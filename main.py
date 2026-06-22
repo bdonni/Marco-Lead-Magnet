@@ -478,12 +478,20 @@ def build_pdf_html(req: BriefingRequest, assessment: dict) -> str:
 # Slack delivery
 # ---------------------------------------------------------------------------
 
+def truncate(text: str, limit: int = 2800) -> str:
+    """Truncate text for Slack block character limits."""
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes):
-    company    = safe_str(req.company_name, "Unknown Company")
-    lead       = safe_str(req.lead_name,    "Unknown Contact")
-    motivation = assessment.get("motivation_hypothesis", "")
-    strengths  = assessment.get("key_strengths", [])
+    company        = safe_str(req.company_name, "Unknown Company")
+    lead           = safe_str(req.lead_name,    "Unknown Contact")
+    motivation     = assessment.get("motivation_hypothesis", "")
+    strengths      = assessment.get("key_strengths", [])
+    note           = assessment.get("marco_briefing_note", "")
     strengths_text = "\n".join(f"• {s}" for s in strengths)
+    biz_text       = clean_text(req.business_summary or "")
+    owner_text     = clean_text(req.owner_summary or "")
 
     if SLACK_WEBHOOK_URL:
         blocks = [
@@ -501,13 +509,33 @@ def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes):
                 ]
             },
             {"type": "divider"},
+        ]
+
+        if biz_text:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Business Overview*\n{truncate(biz_text)}"}
+            })
+
+        if owner_text:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Owner Profile*\n{truncate(owner_text)}"}
+            })
+
+        blocks += [
+            {"type": "divider"},
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Exit Motivation*\n{motivation}"}
+                "text": {"type": "mrkdwn", "text": f"*Exit Motivation*\n{truncate(motivation)}"}
             },
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"*Deal Strengths*\n{strengths_text}"}
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Advisor Note*\n{truncate(note)}"}
             },
             {"type": "divider"},
             {
@@ -521,28 +549,18 @@ def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes):
         company_safe = re.sub(r"[^a-zA-Z0-9_]", "_", company)
         filename     = f"Pre_Call_Brief_{company_safe}.pdf"
 
-        r1 = requests.post(
-            "https://slack.com/api/files.getUploadURLExternal",
+        requests.post(
+            "https://slack.com/api/files.upload",
             headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-            json={"filename": filename, "length": len(pdf_bytes)},
-            timeout=15,
+            data={
+                "channels":       SLACK_CHANNEL_ID,
+                "filename":       filename,
+                "title":          f"Pre-Call Brief: {company}",
+                "initial_comment": f"Full briefing PDF for {lead} at {company}",
+            },
+            files={"file": (filename, pdf_bytes, "application/pdf")},
+            timeout=60,
         )
-        data1      = r1.json()
-        upload_url = data1.get("upload_url")
-        file_id    = data1.get("file_id")
-
-        if upload_url and file_id:
-            requests.post(upload_url, data=pdf_bytes, timeout=30)
-            requests.post(
-                "https://slack.com/api/files.completeUploadExternal",
-                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-                json={
-                    "files":           [{"id": file_id, "title": f"Pre-Call Brief: {company}"}],
-                    "channel_id":      SLACK_CHANNEL_ID,
-                    "initial_comment": f"Full briefing PDF for {lead} at {company}",
-                },
-                timeout=15,
-            )
 
 
 # ---------------------------------------------------------------------------
