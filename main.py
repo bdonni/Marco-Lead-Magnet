@@ -533,10 +533,6 @@ def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes):
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"*Deal Strengths*\n{strengths_text}"}
             },
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Advisor Note*\n{truncate(note)}"}
-            },
             {"type": "divider"},
             {
                 "type": "context",
@@ -545,27 +541,57 @@ def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes):
         ]
         requests.post(SLACK_WEBHOOK_URL, json={"blocks": blocks}, timeout=10)
 
+    slack_debug = {}
     if SLACK_BOT_TOKEN and SLACK_CHANNEL_ID:
         company_safe = re.sub(r"[^a-zA-Z0-9_]", "_", company)
         filename     = f"Pre_Call_Brief_{company_safe}.pdf"
 
-        requests.post(
-            "https://slack.com/api/files.upload",
+        # Step 1: get upload URL
+        r1      = requests.post(
+            "https://slack.com/api/files.getUploadURLExternal",
             headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-            data={
-                "channels":       SLACK_CHANNEL_ID,
-                "filename":       filename,
-                "title":          f"Pre-Call Brief: {company}",
-                "initial_comment": f"Full briefing PDF for {lead} at {company}",
-            },
-            files={"file": (filename, pdf_bytes, "application/pdf")},
-            timeout=60,
+            data={"filename": filename, "length": len(pdf_bytes)},
+            timeout=15,
         )
+        r1_data    = r1.json()
+        upload_url = r1_data.get("upload_url")
+        file_id    = r1_data.get("file_id")
+        slack_debug["step1"] = r1_data
+
+        if upload_url and file_id:
+            # Step 2: PUT the file bytes
+            r2 = requests.put(
+                upload_url,
+                data=pdf_bytes,
+                headers={"Content-Type": "application/pdf"},
+                timeout=60,
+            )
+            slack_debug["step2_status"] = r2.status_code
+
+            # Step 3: complete and post to channel
+            r3 = requests.post(
+                "https://slack.com/api/files.completeUploadExternal",
+                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                json={
+                    "files":           [{"id": file_id, "title": f"Pre-Call Brief: {company}"}],
+                    "channel_id":      SLACK_CHANNEL_ID,
+                    "initial_comment": f"Pre-call briefing PDF for {lead} at {company}",
+                },
+                timeout=15,
+            )
+            slack_debug["step3"] = r3.json()
+        else:
+            slack_debug["error"] = "No upload_url or file_id returned"
+    return slack_debug
 
 
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
+
+def post_to_slack_debug(req: BriefingRequest, assessment: dict, pdf_bytes: bytes) -> dict:
+    """Wrapper that returns debug info from post_to_slack."""
+    return post_to_slack(req, assessment, pdf_bytes)
 
 @app.post("/generate-briefing")
 async def generate_briefing(req: BriefingRequest):
@@ -575,8 +601,8 @@ async def generate_briefing(req: BriefingRequest):
         assessment   = generate_assessment(req)
         html_content = build_pdf_html(req, assessment)
         pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
-        post_to_slack(req, assessment, pdf_bytes)
-        return {"status": "success", "company": req.company_name}
+        slack_debug  = post_to_slack(req, assessment, pdf_bytes)
+        return {"status": "success", "company": req.company_name, "slack_debug": slack_debug}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
