@@ -11,6 +11,8 @@ from pydantic import BaseModel
 from anthropic import Anthropic
 from weasyprint import HTML as WeasyHTML
 
+from identity import resolve_owner_profile
+
 app = FastAPI()
 
 claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -39,6 +41,7 @@ class BriefingRequest(BaseModel):
     business_summary: Optional[str] = None
     recent_news:      Optional[str] = None
     owner_summary:    Optional[str] = None
+    title:            Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -88,12 +91,15 @@ def years_operating(founded_year) -> Optional[int]:
 # Claude assessment
 # ---------------------------------------------------------------------------
 
-def generate_assessment(req: BriefingRequest) -> dict:
+def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upstream") -> dict:
     parts = []
     if req.business_summary:
         parts.append(f"BUSINESS OVERVIEW:\n{req.business_summary}")
+    if req.title:
+        parts.append(f"CONTACT'S TITLE ON OUR RECORD: {req.title}")
     if req.owner_summary:
-        parts.append(f"OWNER PROFILE:\n{req.owner_summary}")
+        label = "OWNER PROFILE (verified against the company)" if owner_status != "unverified" else "OWNER PROFILE (NOT VERIFIED - no public source ties this person to the company yet)"
+        parts.append(f"{label}:\n{req.owner_summary}")
     if req.recent_news and not no_news(req.recent_news):
         parts.append(f"RECENT DEVELOPMENTS:\n{req.recent_news}")
     yrs = years_operating(req.founded_year)
@@ -109,6 +115,8 @@ def generate_assessment(req: BriefingRequest) -> dict:
 Marco is about to speak with {req.lead_name or "the owner"} at {req.company_name or "this company"}. Here is everything we know:
 
 {context}
+
+Rules: never say or imply that {req.lead_name or "the contact"} works somewhere else, is someone else, or is not connected to {req.company_name or "the company"}. If the owner profile is not verified, do not guess tenure or age; tell Marco what to confirm early in the call instead.
 
 Generate a concise M&A briefing. Return ONLY valid JSON with exactly these fields, no preamble, no markdown, no em dashes anywhere in your output:
 
@@ -144,7 +152,14 @@ Generate a concise M&A briefing. Return ONLY valid JSON with exactly these field
 # PDF builder
 # ---------------------------------------------------------------------------
 
-def build_pdf_html(req: BriefingRequest, assessment: dict) -> str:
+OWNER_STATUS_NOTE = {
+    "verified_upstream": "",
+    "verified_research": "Verified from sources that name both this person and this company.",
+    "unverified": "Unverified - confirm role and ownership on the call.",
+}
+
+
+def build_pdf_html(req: BriefingRequest, assessment: dict, owner_status: str = "verified_upstream") -> str:
     today      = datetime.now().strftime("%d %B %Y")
     company    = safe_str(req.company_name, "Unknown Company")
     lead       = safe_str(req.lead_name,    "Unknown Contact")
@@ -194,7 +209,7 @@ def build_pdf_html(req: BriefingRequest, assessment: dict) -> str:
     owner_section = f'''
       <div class="section">
         <div class="section-title">Owner Profile</div>
-        <p>{owner_text}</p>
+        <p>{owner_text}</p>{f'<p><em>{OWNER_STATUS_NOTE.get(owner_status, "")}</em></p>' if OWNER_STATUS_NOTE.get(owner_status) else ""}
       </div>''' if owner_text else ""
 
     news_section = f'''
@@ -483,7 +498,7 @@ def truncate(text: str, limit: int = 2800) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes):
+def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes, owner_status: str = "verified_upstream"):
     company        = safe_str(req.company_name, "Unknown Company")
     lead           = safe_str(req.lead_name,    "Unknown Contact")
     motivation     = assessment.get("motivation_hypothesis", "")
@@ -520,7 +535,7 @@ def post_to_slack(req: BriefingRequest, assessment: dict, pdf_bytes: bytes):
         if owner_text:
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Owner Profile*\n{truncate(owner_text)}"}
+                "text": {"type": "mrkdwn", "text": f"*Owner Profile*\n{truncate(owner_text)}" + (f"\n_{OWNER_STATUS_NOTE[owner_status]}_" if OWNER_STATUS_NOTE.get(owner_status) else "")}
             })
 
         blocks += [
@@ -594,15 +609,22 @@ def post_to_slack_debug(req: BriefingRequest, assessment: dict, pdf_bytes: bytes
     return post_to_slack(req, assessment, pdf_bytes)
 
 @app.post("/generate-briefing")
-async def generate_briefing(req: BriefingRequest):
+async def generate_briefing(req: BriefingRequest, dry_run: bool = False):
     if not req.company_name and not req.lead_name:
         raise HTTPException(status_code=422, detail="At least company_name or lead_name is required.")
     try:
-        assessment   = generate_assessment(req)
-        html_content = build_pdf_html(req, assessment)
+        owner_text, owner_status, why = resolve_owner_profile(claude_client, req)
+        print(json.dumps({"event": "owner_identity", "company": req.company_name, "contact": req.lead_name,
+                          "status": owner_status, "reason": why}), flush=True)
+        req.owner_summary = owner_text
+        assessment   = generate_assessment(req, owner_status)
+        html_content = build_pdf_html(req, assessment, owner_status)
         pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
-        slack_debug  = post_to_slack(req, assessment, pdf_bytes)
-        return {"status": "success", "company": req.company_name, "slack_debug": slack_debug}
+        if dry_run:
+            return {"status": "dry_run", "company": req.company_name, "owner_status": owner_status,
+                    "owner_reason": why, "owner_profile": owner_text, "assessment": assessment}
+        slack_debug  = post_to_slack(req, assessment, pdf_bytes, owner_status)
+        return {"status": "success", "company": req.company_name, "owner_status": owner_status, "slack_debug": slack_debug}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
