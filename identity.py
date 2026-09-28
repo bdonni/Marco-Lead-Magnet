@@ -196,7 +196,8 @@ def write_verified_profile(client, a: dict, evidence: list) -> Optional[str]:
 
 Use ONLY the evidence below. Every line in the evidence mentions this person and this company.
 Rules:
-- State their role at {a['company']} and whether they founded or own it, only as far as the evidence says.
+- State their role at {a['company']}. Say they founded, co-founded or own it only if the evidence says so; if it does not, leave founding and ownership out.
+- Never write about what the evidence does not say (no "no evidence states", "unclear whether", "not confirmed").
 - Include background, tenure or age only if the evidence ties it to this person.
 - Never mention any other employer unless the evidence shows it is this same person's history.
 - If a fact is not in the evidence, leave it out. Do not guess ages.
