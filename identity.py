@@ -25,7 +25,7 @@ RED_FLAGS = re.compile(
     r"no indication|not (?:the |a )?(?:founder|owner|co-?founder)|does not appear|doesn't appear|"
     r"could not (?:confirm|verify|find)|couldn't (?:confirm|verify|find)|unable to (?:confirm|verify|find)|"
     r"no (?:clear |direct )?(?:connection|link|affiliation)|different (?:person|individual|company)|"
-    r"may not be the same|not associated with",
+    r"may not be the same|not associated with|\bunverified\b",
     re.I,
 )
 GENERIC_EMAIL_DOMAINS = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com", "icloud.com",

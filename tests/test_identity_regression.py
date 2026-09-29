@@ -41,6 +41,10 @@ QUIET = "• Eric True is a Project Engineer at TREKK Design Group, LLC, which h
 v, why_q = identity.check_profile(client, identity.anchors(r1), QUIET)
 check("quiet wrong-person profile caught by model check", v != "MATCH", f"{v}: {why_q}")
 
+# 1c. the Clay Owner Profile prompt now answers UNVERIFIED when nothing ties the person to the company
+v_u, why_u = identity.check_profile(client, identity.anchors(r1), "UNVERIFIED - no public profile ties this person to the company.")
+check("Clay UNVERIFIED reply rejected without a model call", v_u == "MISMATCH" and "could not tie" in why_u, why_u)
+
 # 2. a profile that does place him at the company passes untouched
 text2, status2, why2 = identity.resolve_owner_profile(client, req(lead_name="Eric True", email="eric@digitaldentalleaders.com",
     company_name="Digital Dental Leaders", website="digitaldentalleaders.com", owner_summary=RIGHT))
