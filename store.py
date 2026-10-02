@@ -83,7 +83,7 @@ CREATE INDEX IF NOT EXISTS briefs_company ON briefs(company);
 MEETING_RANK = {"thread": 1, "manual": 2, "calendar": 3}
 
 BOOKING_FIELDS = ("lead_name", "first_name", "title", "company", "website", "location", "campaign_id",
-                  "campaign_name", "lead_id")
+                  "campaign_name", "lead_id", "form_answers")
 
 
 def now_iso() -> str:
@@ -117,6 +117,8 @@ def init() -> None:
             c.execute("ALTER TABLE bookings ADD COLUMN meeting_event_uid TEXT")
         if "meeting_day_only" not in cols:
             c.execute("ALTER TABLE bookings ADD COLUMN meeting_day_only INTEGER DEFAULT 0")
+        if "form_answers" not in cols:  # answers from a booking form (Calendly), kept for brief rebuilds
+            c.execute("ALTER TABLE bookings ADD COLUMN form_answers TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS bookings_share ON bookings(share_token)")
         c.execute("CREATE INDEX IF NOT EXISTS bookings_bid ON bookings(bid)")
         for r in c.execute("SELECT email FROM bookings WHERE share_token IS NULL").fetchall():

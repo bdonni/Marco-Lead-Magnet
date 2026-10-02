@@ -149,6 +149,9 @@ def test_calendly_booking_creates_call_and_cancel_hides_it():
     assert b["meeting_at"] == "2026-10-06T15:00:00Z" and b["meeting_source"] == "calendar" and b["company"] == "Trigon Insurance"
     assert got[0]["qa"][1] == ("What would you like to discuss?", "Valuing my book")
     assert calendly.qa_text(got[0]["qa"]).startswith("Agency name: Trigon Insurance")
+    assert b["form_answers"].endswith("What would you like to discuss?: Valuing my book")
+    page = c.get(f"/b/{b['share_token']}").text
+    assert "Booking form answers" in page and "Valuing my book" in page
     other = {"uri": "https://api.calendly.com/scheduled_events/E0/invitees/I0",
              "scheduled_event": {"uri": "https://api.calendly.com/scheduled_events/E0", "name": "Free Valuation Inquiry",
                                  "start_time": "2026-10-03T15:00:00.000000Z"}}

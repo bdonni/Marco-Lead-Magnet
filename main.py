@@ -706,9 +706,12 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
               source: str = "clay", post: bool = True, store_brief: Optional[bool] = None,
               booked_now: bool = False, extra_words: Optional[str] = None) -> dict:
     apply_lead_record(req, smartlead_lead(req.email, SMARTLEAD_API_KEY), notes)
-    if thread is None and req.email:
-        b = store.get_booking(store.bid_for(req.email))
-        thread = (b or {}).get("thread") or []
+    if req.email and (thread is None or extra_words is None):
+        b = store.get_booking(store.bid_for(req.email)) or {}
+        if thread is None:
+            thread = b.get("thread") or []
+        if extra_words is None:
+            extra_words = b.get("form_answers")
     if not req.business_summary and req.website:
         overview = overview_from_site(claude_client, OVERVIEW_MODEL, req.company_name, domain_of(req.website))
         if overview:
@@ -913,7 +916,7 @@ def _handle_calendly(bk: dict):
         print(json.dumps({"event": "brief_duplicate_skipped", "contact": req.lead_name, "via": "calendly"}), flush=True)
         return
     try:
-        run_brief(req, notes, source="calendly", store_brief=True, extra_words=calendly.qa_text(bk.get("qa") or []))
+        run_brief(req, notes, source="calendly", store_brief=True)
     except Exception as e:
         print(json.dumps({"event": "brief_failed", "contact": req.lead_name, "via": "calendly", "error": str(e)[:300],
                           "trace": traceback.format_exc()[-1500:]}), flush=True)

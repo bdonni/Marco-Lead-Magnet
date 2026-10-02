@@ -59,6 +59,7 @@ def booking_from_invitee(payload: dict) -> dict:
         "meeting": {"at": _iso(ev.get("start_time")), "text": (ev.get("name") or "Calendly booking")[:120],
                     "quote": None, "source": "calendar", "uid": ev.get("uri")},
         "hidden": False,
+        "form_answers": qa_text(qa) or None,
         "qa": qa,
         "invitee_uri": payload.get("uri"),
         "rescheduled": bool(payload.get("rescheduled")),

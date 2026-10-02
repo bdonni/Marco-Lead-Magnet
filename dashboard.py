@@ -430,6 +430,12 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     thread_html = (f"<div class='card thread'><div class='briefhead'><b>Email thread</b><small class='muted'>{len(msgs)} emails</small></div>{''.join(msgs)}</div>"
                    if msgs else "<div class='card empty'>No emails stored for this booking yet.</div>")
 
+    if b.get("form_answers"):
+        rows = "".join(f"<div class='msg reply'><div class='body'>{e(line)}</div></div>"
+                       for line in b["form_answers"].splitlines() if line.strip())
+        thread_html = (f"<div class='card thread'><div class='briefhead'><b>Booking form answers</b></div>{rows}</div>"
+                       + thread_html)
+
     back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else "<span></span>"
     body = f"""<div class="brandbar">{back_link}{_logo_tile()}</div>
 <div class="card hero"><div><h1>{e(b.get('company') or '(company unknown)')}</h1>
