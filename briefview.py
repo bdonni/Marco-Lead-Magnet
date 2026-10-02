@@ -34,6 +34,10 @@ def points(text: Optional[str], limit: int = 6) -> list:
     return out[:limit]
 
 
+US_STATES = set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND "
+                "OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split())
+
+
 def clean_place(v: Optional[str]) -> Optional[str]:
     """'US correspondence address: 313 Stamford Dr, Newark, DE 19711 (Nextdoor); facility...' -> 'Newark, DE'."""
     if not v:
@@ -41,9 +45,9 @@ def clean_place(v: Optional[str]) -> Optional[str]:
     s = re.sub(r"\([^)]*\)", "", str(v)).strip()
     if len(s) <= 40 and ";" not in s and ":" not in s and not re.search(r"\d", s):
         return s.strip(" ,.") or None
-    m = re.search(r"([A-Z][A-Za-z.' -]{1,30}),\s*([A-Z]{2})\b", s)
-    if m:
-        return f"{m.group(1).strip()}, {m.group(2)}"
+    for m in re.finditer(r"([A-Z][A-Za-z.' -]{1,30}),\s*([A-Z]{2})\b", s):
+        if m.group(2) in US_STATES:
+            return f"{m.group(1).strip()}, {m.group(2)}"
     first = s.split(";")[0].split(":")[-1].strip(" ,.")
     return first if 0 < len(first) <= 40 else None
 
