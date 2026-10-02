@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover
     ZoneInfo = None
 
 BOOKED_CATEGORY_IDS = {96272}
+CLOCK_RE = re.compile(r"\b\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b|\bnoon\b|\bmidday\b", re.I)
 CARRARA_CAMPAIGN_RE = re.compile(r"^\s*(CRR\b|Marco\b)", re.I)
 
 STATE_TZ = {
@@ -199,10 +200,17 @@ Message times are UTC. The prospect's state timezone is {tz_hint}.
 
 Calendar for working out dates: {calendar}
 
-Has a specific date and time for the call been agreed (proposed by one side and accepted, or a calendar booking confirmed)?
-A list of options is not agreement; use the option the other side accepted. Resolve weekday names with the calendar
-above, counting forward from the date of the message they appear in. Return ONLY JSON:
+Has a date (and time) for the call been agreed: proposed by one side and accepted by the other, or a booking
+confirmed (e.g. "I just scheduled for Monday afternoon")?
+Rules:
+- A list of options is not agreement; use the option the other side accepted.
+- A conditional offer ("if you're available at 9am today I could do that") is NOT agreement unless the other side
+  accepts it. Later messages override earlier ones (e.g. "let's keep it to Monday" cancels the 9am offer).
+- If the agreed day has no clock time ("Monday afternoon", "Monday works"), set time_known to false and use 12:00.
+- Resolve weekday names with the calendar above, counting forward from the date of the message they appear in.
+Return ONLY JSON:
 {{"agreed": true or false,
+  "time_known": true or false,
   "local_datetime": "YYYY-MM-DDTHH:MM" (24h clock, in the timezone the time was stated in),
   "timezone": IANA name the time was stated in, e.g. "America/New_York" for ET, "America/Chicago" for CT; use the prospect's state timezone if none is stated,
   "stated_as": "the time as written, e.g. Friday at 10am ET",
@@ -229,6 +237,11 @@ If no specific time was agreed, return {{"agreed": false}}."""
     said = next((i for i, dname in enumerate(days) if dname in (d.get("stated_as") or "").lower()), None)
     if said is not None and local.weekday() != said:
         return None
+    # a clock time is only trusted when the words themselves contain one ("10am", "11:30", "noon")
+    said_text = f"{d.get('stated_as') or ''} {d.get('quote') or ''}"
+    day_only = d.get("time_known") is False or not CLOCK_RE.search(said_text)
+    if day_only:
+        at = local.replace(hour=12, minute=0).replace(tzinfo=ZoneInfo(tzname)).astimezone(timezone.utc)
     last = max((m.get("time") or "" for m in thread), default="")
     try:
         last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
@@ -237,4 +250,5 @@ If no specific time was agreed, return {{"agreed": false}}."""
     except ValueError:
         pass
     return {"at": at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "text": (d.get("stated_as") or "")[:80], "quote": (d.get("quote") or "")[:200], "source": "thread"}
+            "text": (d.get("stated_as") or "")[:80], "quote": (d.get("quote") or "")[:200], "source": "thread",
+            "day_only": day_only}

@@ -396,6 +396,42 @@ def test_notify_endpoint_posts_one_note():
     assert "/b/" in r.json()["link"]
 
 
+def test_day_only_when_no_clock_time_was_agreed():
+    from bookings import extract_meeting
+
+    class Fake:
+        def __init__(self, out):
+            self.out = out
+            self.messages = self
+
+        def create(self, **kw):
+            return types.SimpleNamespace(content=[types.SimpleNamespace(text=json.dumps(self.out))])
+
+    thread = [{"type": "REPLY", "time": "2026-10-02T12:27:00Z",
+               "text": "I just scheduled for Monday afternoon but this morning opened up. If you're available at 9am today I could do that. If not, Monday works too."},
+              {"type": "SENT", "time": "2026-10-02T12:32:00Z", "text": "Hey Josh, all good. Let's just keep it to Monday from now."}]
+    # Whalers Brewing: the model put 1pm on "Monday afternoon" -> stored as day-only, never as 1pm
+    guess = Fake({"agreed": True, "time_known": True, "local_datetime": "2026-10-05T13:00", "timezone": "America/New_York",
+                  "stated_as": "Monday afternoon", "quote": "Let's just keep it to Monday from now."})
+    m = extract_meeting(guess, "m", thread, "Rhode Island")
+    assert m["day_only"] is True and m["at"] == "2026-10-05T16:00:00Z"
+    store.upsert_booking({"email": "josh@whalers.com", "company": "Whalers Brewing", "lead_name": "Josh Dunlap",
+                         "booked_at": "2026-10-02T12:31:47Z", "meeting": m})
+    b = store.get_booking(store.bid_for("josh@whalers.com"))
+    assert b["meeting_day_only"] == 1
+    c = TestClient(main.app)
+    c.cookies.set("mb_key", VIEW_KEY)
+    page = c.get(f"/briefs/{b['bid']}").text
+    assert "Time not confirmed" in page and "1:00 PM" not in page and "12:00 PM" not in page
+    lst = c.get("/briefs?view=all").text
+    assert "time not confirmed" in lst
+    # an explicit agreed time is still kept
+    ok = Fake({"agreed": True, "time_known": True, "local_datetime": "2026-10-02T10:00", "timezone": "America/New_York",
+               "stated_as": "Friday at 10am ET", "quote": "Friday at 10am ET works for us."})
+    m2 = extract_meeting(ok, "m", [{"type": "REPLY", "time": "2026-09-30T21:13:41Z", "text": "Friday at 10am ET works for us."}], "Maryland")
+    assert m2["day_only"] is False and m2["at"] == "2026-10-02T14:00:00Z"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

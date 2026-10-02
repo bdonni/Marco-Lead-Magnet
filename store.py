@@ -115,6 +115,8 @@ def init() -> None:
             c.execute("ALTER TABLE bookings ADD COLUMN share_token TEXT")
         if "meeting_event_uid" not in cols:
             c.execute("ALTER TABLE bookings ADD COLUMN meeting_event_uid TEXT")
+        if "meeting_day_only" not in cols:
+            c.execute("ALTER TABLE bookings ADD COLUMN meeting_day_only INTEGER DEFAULT 0")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS bookings_share ON bookings(share_token)")
         c.execute("CREATE INDEX IF NOT EXISTS bookings_bid ON bookings(bid)")
         for r in c.execute("SELECT email FROM bookings WHERE share_token IS NULL").fetchall():
@@ -157,8 +159,10 @@ def upsert_booking(d: dict) -> Optional[str]:
         m = d.get("meeting")
         # Marco's calendar beats a time set by hand, which beats one read from the email thread.
         if isinstance(m, dict) and MEETING_RANK.get(m.get("source"), 0) >= MEETING_RANK.get(row["meeting_source"], 0):
-            sets += ["meeting_at=?", "meeting_text=?", "meeting_source=?", "meeting_quote=?", "meeting_event_uid=?"]
-            vals += [m.get("at"), m.get("text"), m.get("source"), m.get("quote"), m.get("uid")]
+            sets += ["meeting_at=?", "meeting_text=?", "meeting_source=?", "meeting_quote=?", "meeting_event_uid=?",
+                     "meeting_day_only=?"]
+            vals += [m.get("at"), m.get("text"), m.get("source"), m.get("quote"), m.get("uid"),
+                     1 if m.get("day_only") else 0]
         if "hidden" in d:
             sets.append("hidden=?"); vals.append(1 if d["hidden"] else 0)
         if sets:

@@ -634,8 +634,10 @@ def post_booking_notice(req: BriefingRequest, booking: Optional[dict]) -> dict:
     src = (booking or {}).get("meeting_source")
     if day and src == "calendar":
         when = f"{day} · {hours}"
+    elif day and (booking or {}).get("meeting_day_only"):
+        when = f"{day} · time not confirmed _(not on Marco's calendar yet)_"
     elif day:
-        when = f"{day} · {hours} _(not on Marco's calendar yet)_"
+        when = f"{day} · {hours} _(from the email thread, not on Marco's calendar yet)_"
     else:
         when = "Not on Marco's calendar yet"
     link = dashboard.share_link(booking)

@@ -294,6 +294,8 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
     for b in shown:
         day, hours = _fmt_call(b.get("meeting_at"))
         ct_part, _, et_part = hours.partition(" · ")
+        if b.get("meeting_day_only"):
+            ct_part, et_part = "time not confirmed", (b.get("meeting_text") or "")[:40]
         unconf = "" if b.get("meeting_source") == "calendar" else "<br><small class='warnline'>not on calendar yet</small>"
         when = (f"<b>{e(day)}</b><small>{e(ct_part)}<br>{e(et_part)}</small><br><span class='rel'>{e(_rel(b.get('meeting_at')))}</span>{unconf}"
                 if day else "<span class='badge neutral'>Time not set</span>")
@@ -344,12 +346,16 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     a = br.get("assessment") or {}
 
     day, hours = _fmt_call(b.get("meeting_at"))
+    if day and b.get("meeting_day_only"):
+        hours = "Time not confirmed"
     if day:
         src = b.get("meeting_source")
         if src == "calendar":
             note = f"On Marco's calendar: {e(b.get('meeting_text') or 'event')}"
         elif src == "manual":
             note = "Set by hand · not on Marco's calendar yet"
+        elif b.get("meeting_day_only"):
+            note = f"Not on Marco's calendar yet · the email thread only gives the day: “{e(b.get('meeting_quote') or b.get('meeting_text'))}”"
         else:
             note = f"Not on Marco's calendar yet · from the email thread: “{e(b.get('meeting_quote') or b.get('meeting_text'))}”"
         call = f"<div class='big'>{e(day)}</div><div>{e(hours)}</div><small class='muted'>{e(_rel(b.get('meeting_at')))} · {note}</small>"
