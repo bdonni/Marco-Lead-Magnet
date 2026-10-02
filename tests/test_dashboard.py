@@ -378,6 +378,24 @@ def test_calendar_times_win_and_unmatched_events_listed():
     assert api["unmatched"][0]["attendees"] == ["pat@newco.com"]
 
 
+def test_notify_endpoint_posts_one_note():
+    sent = []
+
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+    main.requests.post = lambda url, json=None, timeout=None, **kw: (sent.append(json), R())[1]
+    main.SLACK_WEBHOOK_URL = "https://hooks.slack.test/x"
+    c = TestClient(main.app)
+    assert c.post("/api/briefs/notify", json={"email": "nobody@x.com"}).status_code == 401
+    assert c.post("/api/briefs/notify", headers={"x-ingest-key": INGEST_KEY}, json={"email": "nobody@x.com"}).status_code == 404
+    r = c.post("/api/briefs/notify", headers={"x-ingest-key": INGEST_KEY}, json={"email": "notice@test.com"})
+    assert r.status_code == 200 and len(sent) == 1 and "Call booked: Notice Co" in sent[0]["text"]
+    assert "/b/" in r.json()["link"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

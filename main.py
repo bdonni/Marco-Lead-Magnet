@@ -857,6 +857,22 @@ async def smartlead_booked(request: Request, dry_run: bool = False):
     return accept_booked(payload, dry_run)
 
 
+@app.post("/api/briefs/notify")
+async def api_notify(request: Request):
+    """Gamic-only (ingest key): post the 'Call booked' Slack note for a booking that already has its brief."""
+    dashboard._ingest(request)
+    data = await request.json()
+    email = (data.get("email") or "").strip().lower()
+    b = store.get_booking(store.bid_for(email)) if email else None
+    if not b or not b.get("brief"):
+        raise HTTPException(status_code=404, detail="no booking with a brief for that email")
+    req = BriefingRequest(lead_name=b.get("lead_name"), company_name=b.get("company"), email=email,
+                          location=b.get("location"))
+    out = post_booking_notice(req, b)
+    print(json.dumps({"event": "notice_posted", "company": b.get("company"), "via": "api_notify"}), flush=True)
+    return {"ok": True, **out}
+
+
 @app.post("/api/briefs/generate")
 async def api_generate(request: Request):
     """Gamic-only (ingest key): build a brief for a stored booking. post=false stores it on the site only."""
