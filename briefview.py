@@ -42,7 +42,7 @@ def clean_place(v: Optional[str]) -> Optional[str]:
     """'US correspondence address: 313 Stamford Dr, Newark, DE 19711 (Nextdoor); facility...' -> 'Newark, DE'."""
     if not v:
         return None
-    s = re.sub(r"\([^)]*\)", "", str(v)).strip()
+    s = re.sub(r"\s+,", ",", re.sub(r"\([^)]*\)", "", str(v))).strip()
     if len(s) <= 40 and ";" not in s and ":" not in s and not re.search(r"\d", s):
         return s.strip(" ,.") or None
     for m in re.finditer(r"([A-Z][A-Za-z.' -]{1,30}),\s*([A-Z]{2})\b", s):

@@ -625,28 +625,32 @@ def post_to_slack_debug(req: BriefingRequest, assessment: dict, pdf_bytes: bytes
     """Wrapper that returns debug info from post_to_slack."""
     return post_to_slack(req, assessment, pdf_bytes)
 
-def post_booking_notice(req: BriefingRequest, booking: Optional[dict]) -> dict:
+def post_booking_notice(req: BriefingRequest, booking: Optional[dict], correction: bool = False) -> dict:
     """Slack gets a short 'call booked' note with a link to the booking's page on the brief site."""
     company = safe_str(req.company_name, "Unknown company")
     lead = safe_str(req.lead_name, "")
-    where = ((booking or {}).get("location") or req.location or "").strip()
+    where = briefview.clean_place((booking or {}).get("location") or req.location) or ""
     day, hours = dashboard._fmt_call((booking or {}).get("meeting_at"))
     src = (booking or {}).get("meeting_source")
+    linked = bool(store.get_setting("calendar_ics_url"))
+    unconfirmed = "not on Marco's calendar yet" if linked else "from the email thread"
     if day and src == "calendar":
         when = f"{day} · {hours}"
     elif day and (booking or {}).get("meeting_day_only"):
-        when = f"{day} · time not confirmed _(not on Marco's calendar yet)_"
+        when = f"{day} · time not confirmed _({unconfirmed})_"
     elif day:
-        when = f"{day} · {hours} _(from the email thread, not on Marco's calendar yet)_"
+        when = f"{day} · {hours} _({unconfirmed})_"
     else:
-        when = "Not on Marco's calendar yet"
+        when = "Time not confirmed yet"
     link = dashboard.share_link(booking)
     who = " · ".join(x for x in (lead, extract_city_state(where)) if x)
     blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f":calendar: *Call booked: {company}*\n{who}"}},
+        {"type": "section", "text": {"type": "mrkdwn",
+                                     "text": f":calendar: *{'Correction: ' if correction else ''}Call booked: {company}*\n{who}"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*When:* {when}\n<{link}|Open the pre-call brief and email thread>"}},
     ]
-    payload = {"text": f"Call booked: {company}" + (f" ({lead})" if lead else ""), "blocks": blocks}
+    payload = {"text": ("Correction: " if correction else "") + f"Call booked: {company}" + (f" ({lead})" if lead else ""),
+               "blocks": blocks}
     out = {"link": link}
     if SLACK_WEBHOOK_URL:
         r = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
@@ -870,8 +874,9 @@ async def api_notify(request: Request):
         raise HTTPException(status_code=404, detail="no booking with a brief for that email")
     req = BriefingRequest(lead_name=b.get("lead_name"), company_name=b.get("company"), email=email,
                           location=b.get("location"))
-    out = post_booking_notice(req, b)
-    print(json.dumps({"event": "notice_posted", "company": b.get("company"), "via": "api_notify"}), flush=True)
+    out = post_booking_notice(req, b, correction=bool(data.get("correction")))
+    print(json.dumps({"event": "notice_posted", "company": b.get("company"), "via": "api_notify",
+                      "correction": bool(data.get("correction"))}), flush=True)
     return {"ok": True, **out}
 
 
