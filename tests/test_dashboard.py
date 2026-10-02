@@ -432,6 +432,27 @@ def test_day_only_when_no_clock_time_was_agreed():
     assert m2["day_only"] is False and m2["at"] == "2026-10-02T14:00:00Z"
 
 
+def test_carrara_routes_other_clients_bookings_to_their_service():
+    import requests as _r
+    posted = []
+
+    class R:
+        status_code = 200
+    main.requests.post = lambda url, json=None, timeout=None, **kw: (posted.append((url, json.get("event_id"))), R())[1]
+    store.set_setting("tenant_routes", json.dumps([{"slug": "ggc", "prefixes": ["GGC"], "url": "https://ggc.test/hooks/smartlead-booked"},
+                                                   {"slug": "vant", "prefixes": ["Vant"], "campaign_ids": [4100001],
+                                                    "url": "https://vant.test/hooks/smartlead-booked"}]))
+    c = TestClient(main.app)
+    ev = {"event_type": "LEAD_CATEGORY_UPDATED", "event_id": "g1", "campaign_name": "GGC - TAM2 W1 (Named)", "campaign_id": 1,
+          "lead_category": {"new_id": 96272, "new_name": "Booked"}, "lead_data": {"email": "lindsay@prohoc.com"}}
+    assert c.post("/hooks/smartlead-booked", json=ev).json() == {"ok": True, "routed": "ggc"}
+    pos = {**ev, "event_id": "v9", "campaign_name": "POS REPLY", "campaign_id": 4100001, "lead_data": {"email": "a@b.com"}}
+    assert c.post("/hooks/smartlead-booked", json=pos).json() == {"ok": True, "routed": "vant"}
+    time.sleep(0.5)
+    assert ("https://ggc.test/hooks/smartlead-booked", "g1") in posted and ("https://vant.test/hooks/smartlead-booked", "v9") in posted
+    store.set_setting("tenant_routes", None)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

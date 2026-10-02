@@ -143,6 +143,15 @@ def match(booking: dict, events: list, now: datetime) -> Optional[dict]:
     return upcoming[0] if upcoming else max(top, key=lambda e: e["start"])
 
 
+def _own(email: str) -> bool:
+    """The client's own people (and Gamic) are not prospects."""
+    import tenant
+    hint = (tenant.get("mailbox_hint") or "").lower()
+    own_domains = [d.lower() for d in (tenant.get("own_domains") or [])]
+    e = (email or "").lower()
+    return bool((hint and hint in e) or any(e.endswith("@" + d) for d in own_domains) or e.endswith("@gamicmedia.com"))
+
+
 def sync_once(url: Optional[str] = None) -> dict:
     url = url or store.get_setting("calendar_ics_url")
     if not url:
@@ -176,7 +185,7 @@ def sync_once(url: Optional[str] = None) -> dict:
     store.set_setting("calendar_last_ok", now.replace(microsecond=0).isoformat().replace("+00:00", "Z"))
     store.set_setting("calendar_last_error", None)
     unmatched = [{"uid": e.get("uid"), "start": e["start"].isoformat(),
-                  "attendees": [a for a in (e.get("attendees") or []) if "carrara" not in a]}
+                  "attendees": [a for a in (e.get("attendees") or []) if not _own(a)]}
                  for e in events if e.get("uid") not in used and e["start"] >= now - timedelta(hours=2)
                  and e.get("status") != "CANCELLED" and (e.get("attendees") or [])]
     store.set_setting("calendar_unmatched", json.dumps(unmatched)[:200000])

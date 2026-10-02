@@ -3,6 +3,7 @@ import re
 import json
 import base64
 import threading
+import time
 import traceback
 import requests
 from datetime import datetime
@@ -16,10 +17,11 @@ from anthropic import Anthropic
 from weasyprint import HTML as WeasyHTML
 
 import store
+import tenant
 import dashboard
 import calendar_sync
 from identity import resolve_owner_profile
-from bookings import is_booked_event, is_marco_event, booking_from_payload, prospect_words, extract_meeting
+from bookings import is_booked_event, is_tenant_event, booking_from_payload, prospect_words, extract_meeting
 from research import company_research
 import briefview
 from intake import (flatten, normalize, seen_recently, brief_key, overview_from_site, domain_of,
@@ -154,9 +156,11 @@ def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upst
     context = "\n\n".join(parts) or "Limited information available."
     who, co = req.lead_name or "the owner", req.company_name or "this company"
 
-    prompt = f"""You are preparing a pre-call brief for Marco, a sell-side M&A advisor at Carrara Strategy Group. Marco reads it minutes before the call, often on his phone, so every point must be short and scannable.
-
-Marco is about to speak with {who} at {co}. Here is everything we know:
+    caller, ctx = tenant.get("caller"), tenant.get("caller_context")
+    extra = tenant.get("brief_notes") or ""
+    prompt = f"""You are preparing a pre-call brief for {caller}, {ctx}. {caller} reads it minutes before the call, often on a phone, so every point must be short and scannable.
+{extra}
+{caller} is about to speak with {who} at {co}. Here is everything we know:
 
 {context}
 
@@ -170,7 +174,7 @@ Return ONLY valid JSON, no preamble, no markdown:
 {{
   "walking_in": ["3 to 5 bullets: who will be on the call, their stance, what to lead with, what to avoid"],
   "they_said": ["1 to 3 short quotes copied word for word from their emails, each with who said it, e.g. 'Igol (partner): we certainly do not need to sell'; empty list if there are no emails"],
-  "confirm_on_call": ["3 or 4 short questions Marco should get answered: ownership and decision makers, size (revenue or EBITDA, headcount), timeline, anything unverified"],
+  "confirm_on_call": ["3 or 4 short questions {caller} should get answered: {tenant.get('confirm_focus')}"],
   "why_now": ["2 or 3 bullets on why this owner might be open now, grounded in tenure, age, events or what they wrote"],
   "key_strengths": ["3 bullets on what makes the business attractive to an acquirer"],
   "business_points": ["3 to 5 bullets: what they make or do, who buys it, size signals, ownership"],
@@ -482,7 +486,7 @@ def build_pdf_html(req: BriefingRequest, assessment: dict, owner_status: str = "
 <div class="header">
   <div class="header-top">
     <div class="header-left">
-      <span class="clogo"><img src="data:image/png;base64,{CARRARA_LOGO_B64}" alt="Carrara Strategy Group"></span>
+      {f'<span class="clogo"><img src="data:image/png;base64,{tenant.logo_b64()}" alt="{tenant.get("firm")}"></span>' if tenant.logo_b64() else ''}
       <div>
         <div class="eyebrow">Pre-Call Briefing · Confidential</div>
         <div class="company-name">{company}</div>
@@ -633,7 +637,7 @@ def post_booking_notice(req: BriefingRequest, booking: Optional[dict], correctio
     day, hours = dashboard._fmt_call((booking or {}).get("meeting_at"))
     src = (booking or {}).get("meeting_source")
     linked = bool(store.get_setting("calendar_ics_url"))
-    unconfirmed = "not on Marco's calendar yet" if linked else "from the email thread"
+    unconfirmed = f"not on {tenant.calendar_owner()} calendar yet" if linked else "from the email thread"
     if day and src == "calendar":
         when = f"{day} · {hours}"
     elif day and (booking or {}).get("meeting_day_only"):
@@ -652,14 +656,16 @@ def post_booking_notice(req: BriefingRequest, booking: Optional[dict], correctio
     payload = {"text": ("Correction: " if correction else "") + f"Call booked: {company}" + (f" ({lead})" if lead else ""),
                "blocks": blocks}
     out = {"link": link}
-    if SLACK_WEBHOOK_URL:
-        r = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+    hook = store.get_setting("slack_webhook_url") or SLACK_WEBHOOK_URL
+    channel = store.get_setting("slack_channel_id") or SLACK_CHANNEL_ID
+    if hook:
+        r = requests.post(hook, json=payload, timeout=10)
         out["webhook_status"] = r.status_code
         r.raise_for_status()
-    elif SLACK_BOT_TOKEN and SLACK_CHANNEL_ID:
+    elif SLACK_BOT_TOKEN and channel:
         r = requests.post("https://slack.com/api/chat.postMessage", timeout=10,
                           headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-                          json={"channel": SLACK_CHANNEL_ID, "unfurl_links": False, **payload})
+                          json={"channel": channel, "unfurl_links": False, **payload})
         out["chat"] = r.json().get("ok")
         if not out["chat"]:
             raise RuntimeError(f"slack chat.postMessage failed: {r.text[:200]}")
@@ -752,7 +758,7 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
                                   "names_soft": True})
     if not dry_run and post:
         try:
-            calendar_sync.sync_once()  # the note should carry the time on Marco's calendar if it is there yet
+            calendar_sync.sync_once()  # the note should carry the time on the caller's calendar if it is there yet
         except Exception:
             pass
         booking = store.get_booking(store.bid_for(req.email)) if req.email else None
@@ -832,12 +838,39 @@ def _handle_booked(bk: dict, dry_run: bool):
             release(email)
 
 
+def route_to_other_client(payload: dict) -> Optional[str]:
+    """The shared Smartlead 'Booked Call' hook lands here for every client in the account; another client's
+    booking is passed to that client's own brief service (routes kept in settings 'tenant_routes')."""
+    try:
+        routes = json.loads(store.get_setting("tenant_routes") or "[]")
+    except ValueError:
+        routes = []
+    for r in routes:
+        rx = re.compile(r"^\s*(" + "|".join(re.escape(p) + r"\b" for p in r.get("prefixes") or ["\x00"]) + ")", re.I)
+        if is_tenant_event(payload, rx, r.get("mailbox_hint") or "", r.get("campaign_ids") or []):
+            url = r.get("url")
+            def go(url=url):
+                for attempt in range(3):
+                    try:
+                        rr = requests.post(url, json=payload, timeout=30)
+                        print(json.dumps({"event": "booked_routed", "to": r.get("slug"), "status": rr.status_code}), flush=True)
+                        if rr.status_code < 500:
+                            return
+                    except Exception as e:
+                        print(json.dumps({"event": "booked_route_error", "to": r.get("slug"), "error": str(e)[:200]}), flush=True)
+                    time.sleep(5 * (attempt + 1))
+            threading.Thread(target=go, daemon=True).start()
+            return r.get("slug")
+    return None
+
+
 def accept_booked(payload: dict, dry_run: bool = False) -> dict:
     """A Marco/CRR lead tagged Booked: store the booking + thread and build (and post) the brief now."""
-    if not is_booked_event(payload):
+    if not is_booked_event(payload, tenant.get("booked_category_ids")):
         return {"ok": True, "ignored": "not a Booked category event"}
-    if not is_marco_event(payload, store.campaign_ids()):
-        return {"ok": True, "ignored": "not a Marco campaign"}
+    if not is_tenant_event(payload, tenant.campaign_regex(), tenant.get("mailbox_hint") or "", store.campaign_ids()):
+        routed = route_to_other_client(payload)
+        return {"ok": True, "routed": routed} if routed else {"ok": True, "ignored": "not this client's campaign"}
     bk = booking_from_payload(payload)
     if not bk.get("email"):
         return {"ok": True, "ignored": "no lead email"}
@@ -920,7 +953,8 @@ async def smartlead_slim(request: Request, to: str = ""):
                                               ("to_email", "event_type", "event_timestamp", "campaign_id"))
     if seen_recently(f"relay:{to[-36:]}:{key}", 6 * 3600):
         return {"ok": True, "duplicate": True}
-    # Marco's Booked leads get their brief straight away; every event still goes on to Clay as before.
+    # This client's Booked leads get their brief straight away (others are routed to their own service);
+    # every event still goes on to Clay as before.
     marco = {}
     try:
         marco = accept_booked(payload)

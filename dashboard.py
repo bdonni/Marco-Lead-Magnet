@@ -1,4 +1,4 @@
-"""Marco's pre-call brief site: every booked call, when it is, the email thread and the brief.
+"""A client's pre-call brief site: every booked call, when it is, the email thread and the brief.
 
 Access is a private link (?key=...). Only the SHA-256 of each key is in this public repo; the keys
 themselves live with Gamic. DASHBOARD_KEY_SHA256 / INGEST_KEY_SHA256 env vars override the defaults.
@@ -16,6 +16,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 import store
+import tenant
 import briefview
 import calendar_sync
 from bookings import normalize_thread
@@ -25,8 +26,12 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VIEW_KEY_SHA256 = os.environ.get("DASHBOARD_KEY_SHA256",
-                                 "7f274d0b11225490c338020f316135d59b70619fed2fe9f60989a93d0d2f6a99")
+_CARRARA_VIEW_KEY_SHA256 = "7f274d0b11225490c338020f316135d59b70619fed2fe9f60989a93d0d2f6a99"
+VIEW_KEY_SHA256 = os.environ.get("DASHBOARD_KEY_SHA256", _CARRARA_VIEW_KEY_SHA256 if tenant.TENANT == "carrara" else "")
+
+
+def _view_hash() -> str:
+    return store.get_setting("view_key_sha256") or VIEW_KEY_SHA256
 INGEST_KEY_SHA256 = os.environ.get("INGEST_KEY_SHA256",
                                    "81236eb1d08cfa7fa5affa84909706f9ba478294ee527669462c5f23a3092602")
 COOKIE = "mb_key"
@@ -46,13 +51,13 @@ def configure(render_pdf: Callable = None, extract_meeting: Callable = None):
 
 
 def _ok(key: Optional[str], want: str) -> bool:
-    if not key:
+    if not key or not want:
         return False
     return hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), want)
 
 
 def _viewer(request: Request) -> bool:
-    return _ok(request.cookies.get(COOKIE), VIEW_KEY_SHA256)
+    return _ok(request.cookies.get(COOKIE), _view_hash())
 
 
 def _ingest(request: Request) -> None:
@@ -241,27 +246,33 @@ td.col-thread{display:none}.search{max-width:none;margin-left:0}}
 def _calendar_status() -> str:
     ok = _dt(store.get_setting("calendar_last_ok"))
     if not store.get_setting("calendar_ics_url"):
-        return "call times not linked to Marco's calendar yet"
+        return f"call times not linked to {tenant.calendar_owner()} calendar yet"
     if not ok:
-        return "connecting to Marco's calendar"
+        return f"connecting to {tenant.calendar_owner()} calendar"
     mins = int((datetime.now(timezone.utc) - ok).total_seconds() // 60)
-    return f"call times from Marco's calendar, checked {'just now' if mins < 1 else f'{mins} min ago'}"
+    return f"call times from {tenant.calendar_owner()} calendar, checked {'just now' if mins < 1 else f'{mins} min ago'}"
+
+
+def _logo_tile() -> str:
+    if not tenant.logo_bytes():
+        return ""
+    return f'<span class="logo-tile"><img src="/static/logo.png" alt="{e(tenant.get("firm"))}" height="58"></span>'
 
 
 def page(title: str, body: str) -> HTMLResponse:
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
-<link rel="icon" type="image/png" href="/static/carrara-icon.png">
+<link rel="icon" type="image/png" href="/static/logo.png">
 <title>{e(title)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-<style>{CSS}</style></head><body><div class="wrap">{body}
-<div class="foot">Prepared for Carrara Strategy Group by Gamic · {e(_calendar_status())}</div></div></body></html>"""
+<style>{CSS.replace("--accent:#144e83;", f"--accent:{tenant.get('accent')};").replace("--accent:#8fb3e0;", f"--accent:{tenant.get('accent_dark')};")}</style></head><body><div class="wrap">{body}
+<div class="foot">Prepared for {e(tenant.get('firm'))} by Gamic · {e(_calendar_status())}</div></div></body></html>"""
     return HTMLResponse(doc, headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"})
 
 
 def locked() -> HTMLResponse:
-    body = """<div class="card empty" style="margin-top:80px"><span class='logo-tile'><img src='/static/carrara-logo.png' alt='Carrara Strategy Group' width='81' height='76'></span><h1 style="font-size:20px;margin:14px 0 6px">Pre-Call Briefs</h1>
+    body = """<div class="card empty" style="margin-top:80px">""" + _logo_tile() + """<h1 style="font-size:20px;margin:14px 0 6px">Pre-Call Briefs</h1>
 <p>This page needs your private access link. Ask Gamic to resend it.</p></div>"""
     r = page("Pre-Call Briefs", body)
     r.status_code = 401
@@ -275,7 +286,7 @@ def locked() -> HTMLResponse:
 @router.get("/briefs", response_class=HTMLResponse)
 def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcoming"):
     if key is not None:
-        if not _ok(key, VIEW_KEY_SHA256):
+        if not _ok(key, _view_hash()):
             return locked()
         r = RedirectResponse("/briefs", status_code=303)
         r.set_cookie(COOKIE, key, max_age=180 * 86400, httponly=True, secure=True, samesite="lax")
@@ -323,17 +334,19 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
     table = (f"""<div class="card"><table><thead><tr><th>Call</th><th>Company</th><th>Contact</th><th>Booked</th>
 <th>Brief</th><th class="col-thread">Thread</th></tr></thead><tbody id="rows">{''.join(trs)}</tbody></table></div>"""
              if trs else "<div class='card empty'>Nothing here yet.</div>")
-    body = f"""<header class="top"><div class="brand"><span class="logo-tile"><img src="/static/carrara-logo.png" alt="Carrara Strategy Group" width="81" height="76"></span><div><h1>Pre-Call Briefs</h1><div class="sub">Carrara Strategy Group · every booked call, its email thread and the brief</div></div></div>
+    body = f"""<header class="top"><div class="brand">{_logo_tile()}<div><h1>Pre-Call Briefs</h1><div class="sub">{e(tenant.get('firm'))} · every booked call, its email thread and the brief</div></div></div>
 <div class="stats"><div class="stat"><b>{week}</b><span>calls next 7 days</span></div>
 <div class="stat"><b>{counts['upcoming']}</b><span>upcoming</span></div><div class="stat"><b>{len(rows)}</b><span>booked in total</span></div></div></header>
 <div class="bar"><div class="tabs">{tabs}</div><input class="search" id="q" placeholder="Search company, contact, state" autocomplete="off"></div>
 {table}
 <script>const q=document.getElementById('q');q&&q.addEventListener('input',()=>{{const v=q.value.trim().toLowerCase();
 document.querySelectorAll('#rows tr').forEach(r=>{{r.style.display=!v||r.dataset.s.includes(v)?'':'none'}})}});</script>"""
-    return page("Pre-Call Briefs · Carrara Strategy", body)
+    return page(f"Pre-Call Briefs · {tenant.get('firm_short')}", body)
 
 
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://marco-lead-magnet-production.up.railway.app").rstrip("/")
+PUBLIC_BASE_URL = (os.environ.get("PUBLIC_BASE_URL")
+                   or (("https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]) if os.environ.get("RAILWAY_PUBLIC_DOMAIN") else "")
+                   or "https://marco-lead-magnet-production.up.railway.app").rstrip("/")
 
 
 def share_link(b: Optional[dict]) -> str:
@@ -352,7 +365,7 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     if day:
         src = b.get("meeting_source")
         if src == "calendar":
-            note = f"On Marco's calendar: {e(b.get('meeting_text') or 'event')}"
+            note = f"On {e(tenant.calendar_owner())} calendar: {e(b.get('meeting_text') or 'event')}"
         elif src == "manual":
             note = "Set by hand"
         elif b.get("meeting_day_only"):
@@ -360,10 +373,10 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
         else:
             note = f"From the email thread: “{e(b.get('meeting_quote') or b.get('meeting_text'))}”"
         if src != "calendar" and store.get_setting("calendar_ics_url"):
-            note += " · not on Marco's calendar yet"
+            note += f" · not on {e(tenant.calendar_owner())} calendar yet"
         call = f"<div class='big'>{e(day)}</div><div>{e(hours)}</div><small class='muted'>{e(_rel(b.get('meeting_at')))} · {note}</small>"
     else:
-        call = "<div class='big'>Time not set</div><small class='muted'>Not on Marco's calendar yet. It appears here as soon as it is.</small>"
+        call = f"<div class='big'>Time not set</div><small class='muted'>Not on {e(tenant.calendar_owner())} calendar yet. It appears here as soon as it is.</small>"
     d0 = _dt(b.get("meeting_at"))
     d_ct = d0.astimezone(CT) if d0 else None
     bid = b["bid"]
@@ -410,7 +423,7 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     msgs = []
     for m in b.get("thread") or []:
         reply = m.get("type") == "REPLY"
-        who = "Prospect" if reply else "Carrara"
+        who = "Prospect" if reply else (tenant.get("sender_label") or "Us")
         msgs.append(f"""<div class="msg{' reply' if reply else ''}"><div class="meta"><span><span class="who">{who}</span> · {e(m.get('from'))}</span>
 <span>{e(_fmt_stamp(m.get('time')))}</span></div>{('<div class="muted" style="font-size:13px;margin-bottom:4px">' + e(m.get('subject')) + '</div>') if m.get('subject') else ''}
 <div class="body">{e(m.get('text'))}</div></div>""")
@@ -418,7 +431,7 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
                    if msgs else "<div class='card empty'>No emails stored for this booking yet.</div>")
 
     back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else "<span></span>"
-    body = f"""<div class="brandbar">{back_link}<span class="logo-tile"><img src="/static/carrara-logo.png" alt="Carrara Strategy Group" width="81" height="76"></span></div>
+    body = f"""<div class="brandbar">{back_link}{_logo_tile()}</div>
 <div class="card hero"><div><h1>{e(b.get('company') or '(company unknown)')}</h1>
 <div class="sub">{e(b.get('lead_name') or '')}{(' · ' + e(b.get('title'))) if b.get('title') else ''} · booked {e(_fmt_day(b.get('booked_at')))}</div>
 </div>
@@ -431,7 +444,7 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
 @router.get("/briefs/{bid}", response_class=HTMLResponse)
 def brief_detail(request: Request, bid: str, key: Optional[str] = None):
     if key is not None:
-        if not _ok(key, VIEW_KEY_SHA256):
+        if not _ok(key, _view_hash()):
             return locked()
         r = RedirectResponse(f"/briefs/{bid}", status_code=303)
         r.set_cookie(COOKIE, key, max_age=180 * 86400, httponly=True, secure=True, samesite="lax")
@@ -554,8 +567,9 @@ async def api_ingest(request: Request):
         out["purged"] = store.purge(data["purge"])
     if isinstance(data.get("settings"), dict):
         for k, v in data["settings"].items():
-            if k in ("calendar_ics_url",):
-                store.set_setting(k, v or None)
+            if k in ("calendar_ics_url", "tenant_config", "tenant_logo_b64", "view_key_sha256", "slack_webhook_url",
+                     "slack_channel_id", "tenant_routes"):
+                store.set_setting(k, (json.dumps(v) if isinstance(v, (dict, list)) else v) or None)
                 out.setdefault("settings", []).append(k)
     if data.get("calendar_sync"):
         out["calendar"] = calendar_sync.sync_once()
@@ -580,9 +594,17 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 STATIC_FILES = {"carrara-logo.png", "carrara-icon.png"}
 
 
+@router.get("/static/logo.png")
+def tenant_logo():
+    b = tenant.logo_bytes()
+    if not b:
+        raise HTTPException(status_code=404, detail="no logo")
+    return Response(b, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
 @router.get("/static/{name}")
 def static_file(name: str):
-    if name not in STATIC_FILES:
+    if name not in STATIC_FILES or tenant.TENANT != "carrara":
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(os.path.join(STATIC_DIR, name), media_type="image/png",
                         headers={"Cache-Control": "public, max-age=604800"})

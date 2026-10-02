@@ -42,12 +42,12 @@ def state_tz(state: Optional[str]) -> Optional[str]:
     return STATE_TO_TZ.get(s)
 
 
-def is_booked_event(payload: dict) -> bool:
+def is_booked_event(payload: dict, category_ids=None) -> bool:
     cat = payload.get("lead_category") or {}
     new_id = cat.get("new_id") if isinstance(cat, dict) else None
     new_name = (cat.get("new_name") if isinstance(cat, dict) else "") or ""
     try:
-        if int(new_id) in BOOKED_CATEGORY_IDS:
+        if int(new_id) in set(category_ids or BOOKED_CATEGORY_IDS):
             return True
     except (TypeError, ValueError):
         pass
@@ -58,18 +58,24 @@ def is_marco_campaign(name: Optional[str]) -> bool:
     return bool(CARRARA_CAMPAIGN_RE.match(name or ""))
 
 
-def is_marco_event(payload: dict, known_campaign_ids=()) -> bool:
-    """Marco's lead? Campaign named CRR/Marco, a Carrara sending inbox on the thread, or a campaign id the sync
-    listed as Carrara's. POS REPLY follow-ups are just named "POS REPLY", so the name alone misses them."""
-    if is_marco_campaign(payload.get("campaign_name")):
+def is_tenant_event(payload: dict, campaign_re=None, mailbox_hint: str = "", known_campaign_ids=()) -> bool:
+    """This client's lead? Campaign name prefix, a campaign id the sync listed as theirs (POS REPLY follow-ups are
+    only named "POS REPLY"), or one of their sending inboxes on the thread."""
+    if campaign_re is not None and campaign_re.match(payload.get("campaign_name") or ""):
         return True
     try:
         if int(payload.get("campaign_id")) in set(known_campaign_ids):
             return True
     except (TypeError, ValueError):
         pass
-    boxes = " ".join(str(payload.get(k) or "") for k in ("sl_senders_mailbox", "from_email", "to_email", "from"))
-    return "carrara" in boxes.lower()
+    if mailbox_hint:
+        boxes = " ".join(str(payload.get(k) or "") for k in ("sl_senders_mailbox", "from_email", "to_email", "from"))
+        return mailbox_hint.lower() in boxes.lower()
+    return False
+
+
+def is_marco_event(payload: dict, known_campaign_ids=()) -> bool:
+    return is_tenant_event(payload, CARRARA_CAMPAIGN_RE, "carrara", known_campaign_ids)
 
 
 # ---------------------------------------------------------------------------
