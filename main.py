@@ -756,6 +756,9 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
                                   "company": req.company_name, "website": req.website, "location": req.location,
                                   "title": req.title, "booked_at": store.now_iso() if booked_now else None,
                                   "names_soft": True})
+    if not dry_run and post and not tenant.get("slack_enabled"):
+        print(json.dumps({"event": "slack_disabled", "company": req.company_name}), flush=True)
+        post = False
     if not dry_run and post:
         try:
             calendar_sync.sync_once()  # the note should carry the time on the caller's calendar if it is there yet
@@ -906,6 +909,8 @@ async def api_notify(request: Request):
     b = store.get_booking(store.bid_for(email)) if email else None
     if not b or not b.get("brief"):
         raise HTTPException(status_code=404, detail="no booking with a brief for that email")
+    if not tenant.get("slack_enabled"):
+        raise HTTPException(status_code=409, detail="Slack is switched off for this client")
     req = BriefingRequest(lead_name=b.get("lead_name"), company_name=b.get("company"), email=email,
                           location=b.get("location"))
     out = post_booking_notice(req, b, correction=bool(data.get("correction")))

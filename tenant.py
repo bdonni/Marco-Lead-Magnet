@@ -26,6 +26,7 @@ CARRARA = {
     "campaign_prefixes": ["CRR", "Marco"],
     "mailbox_hint": "carrara",
     "booked_category_ids": [96272],
+    "slack_enabled": True,
 }
 
 GENERIC = {
@@ -40,6 +41,7 @@ GENERIC = {
     "campaign_prefixes": [],
     "mailbox_hint": "",
     "booked_category_ids": [96272],
+    "slack_enabled": False,  # a new client posts nothing to Slack until Ben switches it on
 }
 
 _cache = {"raw": None, "cfg": None}

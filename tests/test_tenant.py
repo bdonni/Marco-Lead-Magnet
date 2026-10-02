@@ -104,6 +104,22 @@ def test_own_account_client_takes_every_campaign():
     assert calls == ["drew@trigonins.com"]
 
 
+def test_new_client_never_posts_to_slack_until_switched_on():
+    sent = []
+    main.requests.post = lambda *a, **k: sent.append(a) or (_ for _ in ()).throw(AssertionError("posted"))
+    main.overview_from_site = lambda *a, **k: "Overview."
+    main.company_research = lambda *a, **k: {}
+    main.resolve_owner_profile = lambda client, req: ("• Owner.", "verified_research", "t")
+    main.generate_assessment = lambda req, status, words=None, facts=None: {"walking_in": ["x"], "key_strengths": []}
+    req = main.BriefingRequest(lead_name="Rod Smith", email="rod@airproelite.com", company_name="Air Pro Elite")
+    out = main.run_brief(req, [], source="smartlead-booked", store_brief=True)
+    assert out["status"] == "success" and sent == []
+    assert store.get_booking(store.bid_for("rod@airproelite.com"))["brief"]["posted_to_slack"] == 0
+    c = TestClient(main.app)
+    r = c.post("/api/briefs/notify", headers={"x-ingest-key": INGEST}, json={"email": "rod@airproelite.com"})
+    assert r.status_code == 409 and sent == []
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
