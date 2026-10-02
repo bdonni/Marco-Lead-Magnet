@@ -357,6 +357,10 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
         if news and news.strip().rstrip(".").lower() not in ("no significant news found", "no news found", "none", "n/a"):
             secs.append(f"<div class='sec'><h2>Recent developments</h2>{_para(news)}</div>")
         pdf = (f"<a class='btn' href='{e(pdf_url)}'>Download PDF</a>" if _hooks["render_pdf"] else "")
+        if editable:
+            pdf = (f"<span style='display:flex;gap:6px'><button class='btn ghost' type='button' "
+                   f"onclick=\"navigator.clipboard.writeText('{e(share_link(b))}');this.textContent='Link copied'\">"
+                   f"Copy link</button>{pdf}</span>")
         posted = " · posted to Slack" if br.get("posted_to_slack") else ""
         brief_html = f"""<div class="card"><div class="briefhead"><div><b>Pre-call brief</b><br>
 <small class="muted">Generated {e(_fmt_stamp(br.get('created_at')))}{posted}</small></div>{pdf}</div>{''.join(secs)}</div>"""

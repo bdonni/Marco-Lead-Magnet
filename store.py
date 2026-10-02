@@ -244,7 +244,7 @@ def get_booking(bid: str) -> Optional[dict]:
 def state() -> list:
     with _lock, _conn() as c:
         return [dict(r) for r in c.execute(
-            "SELECT email, bid, company, lead_id, campaign_id, thread_count, thread_hash, thread_updated_at, "
+            "SELECT email, bid, share_token, company, lead_id, campaign_id, thread_count, thread_hash, thread_updated_at, "
             "meeting_at, meeting_source, booked_at, "
             "(SELECT COUNT(*) FROM briefs WHERE briefs.email=bookings.email) AS briefs FROM bookings")]
 
