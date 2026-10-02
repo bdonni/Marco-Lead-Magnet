@@ -191,7 +191,7 @@ th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);text-transf
 padding:12px 14px;border-bottom:1px solid var(--line)}
 td{padding:14px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{background:var(--soft)}
-.when b{display:block}.when small,.muted{color:var(--muted)}small{font-size:12.5px}
+.when{min-width:118px;white-space:nowrap}.when b{display:block}.when small,.muted{color:var(--muted)}small{font-size:12.5px}
 .co{font-weight:600}.rel{display:inline-block;margin-top:2px;font-size:12px;color:var(--accent);font-weight:600}
 .badge{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
 .badge.ok{color:var(--ok);background:var(--ok-bg)}.badge.warn{color:var(--warn);background:var(--warn-bg)}
@@ -201,9 +201,9 @@ tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{backgrou
 .hero{padding:22px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .facts-card{margin-top:14px;padding:16px 22px}
-.facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px 22px}
+.facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px 22px}
 .fact span{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-.fact b{font-weight:600;font-size:14px;word-break:break-word}
+.fact b{font-weight:600;font-size:14px;overflow-wrap:anywhere}
 .chip{background:var(--chip);border-radius:6px;padding:3px 9px;font-size:13px;color:var(--ink)}
 .calltime{min-width:260px;background:var(--soft);border-radius:10px;padding:14px 16px}
 .calltime .big{font-size:20px;font-weight:700;line-height:1.25}
@@ -282,7 +282,8 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
     trs = []
     for b in shown:
         day, hours = _fmt_call(b.get("meeting_at"))
-        when = (f"<b>{e(day)}</b><small>{e(hours)}</small><br><span class='rel'>{e(_rel(b.get('meeting_at')))}</span>"
+        ct_part, _, et_part = hours.partition(" · ")
+        when = (f"<b>{e(day)}</b><small>{e(ct_part)}<br>{e(et_part)}</small><br><span class='rel'>{e(_rel(b.get('meeting_at')))}</span>"
                 if day else "<span class='badge neutral'>Time not set</span>")
         br = b.get("brief")
         if br:
@@ -295,7 +296,7 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
         trs.append(f"""<tr data-s="{e(search)}" onclick="location.href='/briefs/{e(b['bid'])}'">
 <td class="when">{when}</td>
 <td><div class="co"><a href="/briefs/{e(b['bid'])}">{e(b.get('company') or '(company unknown)')}</a></div><small class="muted">{e(site)}</small></td>
-<td>{e(b.get('lead_name') or b.get('first_name') or '')}<br><small class="muted">{e(b.get('location') or '')}</small></td>
+<td>{e(b.get('lead_name') or b.get('first_name') or '')}<br><small class="muted">{e(briefview.clean_place(b.get('location')) or '')}</small></td>
 <td>{e(_fmt_day(b.get('booked_at')))}</td>
 <td>{brief}</td>
 <td class="col-thread"><small class="muted">{int(b.get('thread_count') or 0)} emails</small></td></tr>""")

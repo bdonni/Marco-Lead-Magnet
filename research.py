@@ -7,6 +7,8 @@ import json
 import re
 from typing import Optional
 
+from briefview import clean_place
+
 
 def company_research(client, model: str, company: Optional[str], site: Optional[str], state: Optional[str]) -> dict:
     if not client or not (company or site):
@@ -41,6 +43,12 @@ Leave a field empty rather than guess. No em dashes."""
         v = str(data.get(k) or "").strip().replace("—", " - ").replace("–", " - ")
         if v and v.lower() not in ("unknown", "n/a", "none", "empty"):
             out[k] = v
+    if out.get("hq"):
+        hq = clean_place(out["hq"])
+        if hq:
+            out["hq"] = hq
+        else:
+            out.pop("hq")
     for k in ("recent_developments", "facts"):
         items = [str(x).strip().replace("—", " - ") for x in (data.get(k) or []) if str(x).strip()]
         if items:

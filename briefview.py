@@ -34,6 +34,28 @@ def points(text: Optional[str], limit: int = 6) -> list:
     return out[:limit]
 
 
+def clean_place(v: Optional[str]) -> Optional[str]:
+    """'US correspondence address: 313 Stamford Dr, Newark, DE 19711 (Nextdoor); facility...' -> 'Newark, DE'."""
+    if not v:
+        return None
+    s = re.sub(r"\([^)]*\)", "", str(v)).strip()
+    if len(s) <= 40 and ";" not in s and ":" not in s and not re.search(r"\d", s):
+        return s.strip(" ,.") or None
+    m = re.search(r"([A-Z][A-Za-z.' -]{1,30}),\s*([A-Z]{2})\b", s)
+    if m:
+        return f"{m.group(1).strip()}, {m.group(2)}"
+    first = s.split(";")[0].split(":")[-1].strip(" ,.")
+    return first if 0 < len(first) <= 40 else None
+
+
+def clean_fact(v: Optional[str], limit: int = 110) -> Optional[str]:
+    """Drop '(per site.com)' style source notes and cap the length."""
+    if not v:
+        return None
+    s = re.sub(r"\s*\((per|source|via)\b[^)]*\)", "", str(v), flags=re.I).strip()
+    return (s[:limit - 1].rstrip() + "…") if len(s) > limit else (s or None)
+
+
 def _years(founded: Optional[str]) -> Optional[int]:
     try:
         y = int(str(founded).strip()[:4])
@@ -49,15 +71,15 @@ def facts(req: dict, booking: Optional[dict] = None) -> list:
     title = req.get("title") or b.get("title")
     founded = req.get("founded_year")
     yrs = _years(founded)
-    loc = req.get("location") or b.get("location")
+    loc = clean_place(req.get("location")) or clean_place(b.get("location"))
     site = (req.get("website") or b.get("website") or "").replace("https://", "").replace("http://", "").strip("/")
     rows = [
         ("Contact", f"{lead}{', ' + title if title else ''}" if lead else None),
         ("Location", loc),
         ("Founded", f"{founded} ({yrs} years)" if founded and yrs else founded),
-        ("Size", req.get("employees")),
-        ("Ownership", req.get("ownership") or req.get("company_type")),
-        ("Revenue", req.get("revenue")),
+        ("Size", clean_fact(req.get("employees"), 60)),
+        ("Ownership", clean_fact(req.get("ownership") or req.get("company_type"))),
+        ("Revenue", clean_fact(req.get("revenue"), 80)),
         ("Website", site or None),
         ("Email", req.get("email") or b.get("email")),
     ]
