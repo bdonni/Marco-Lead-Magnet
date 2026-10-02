@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -101,7 +102,15 @@ def _conn() -> sqlite3.Connection:
 
 def init() -> None:
     with _lock, _conn() as c:
+        c.execute("PRAGMA journal_mode=WAL")  # page reads never wait behind a brief being written
         c.executescript(SCHEMA)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(bookings)")}
+        if "share_token" not in cols:
+            c.execute("ALTER TABLE bookings ADD COLUMN share_token TEXT")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS bookings_share ON bookings(share_token)")
+        c.execute("CREATE INDEX IF NOT EXISTS bookings_bid ON bookings(bid)")
+        for r in c.execute("SELECT email FROM bookings WHERE share_token IS NULL").fetchall():
+            c.execute("UPDATE bookings SET share_token=? WHERE email=?", (secrets.token_urlsafe(12), r["email"]))
 
 
 def upsert_booking(d: dict) -> Optional[str]:
@@ -114,8 +123,8 @@ def upsert_booking(d: dict) -> Optional[str]:
     with _lock, _conn() as c:
         row = c.execute("SELECT * FROM bookings WHERE email=?", (email,)).fetchone()
         if row is None:
-            c.execute("INSERT INTO bookings(email, bid, created_at, updated_at) VALUES (?,?,?,?)",
-                      (email, bid_for(email), ts, ts))
+            c.execute("INSERT INTO bookings(email, bid, share_token, created_at, updated_at) VALUES (?,?,?,?,?)",
+                      (email, bid_for(email), secrets.token_urlsafe(12), ts, ts))
             row = c.execute("SELECT * FROM bookings WHERE email=?", (email,)).fetchone()
         sets, vals = [], []
         for f in BOOKING_FIELDS:
@@ -175,10 +184,12 @@ def _brief_dict(r: sqlite3.Row) -> dict:
 
 
 def _latest_briefs() -> tuple:
+    """Latest brief per lead and per company, light columns only (the list page never needs the text)."""
     by_email, by_company = {}, {}
     with _lock, _conn() as c:
-        for r in c.execute("SELECT * FROM briefs ORDER BY created_at ASC, id ASC"):
-            d = _brief_dict(r)
+        for r in c.execute("SELECT id, email, company, created_at, owner_status, posted_to_slack FROM briefs "
+                           "ORDER BY created_at ASC, id ASC"):
+            d = dict(r)
             if r["email"]:
                 by_email[r["email"]] = d
             k = norm_company(r["company"])
@@ -199,6 +210,17 @@ def list_bookings(include_hidden: bool = False) -> list:
         b.pop("thread_json", None)
         out.append(b)
     return out
+
+
+def get_booking_by_token(token: str) -> Optional[dict]:
+    with _lock, _conn() as c:
+        r = c.execute("SELECT bid FROM bookings WHERE share_token=?", (token,)).fetchone()
+    return get_booking(r["bid"]) if r else None
+
+
+def mark_posted(brief_id: int) -> None:
+    with _lock, _conn() as c:
+        c.execute("UPDATE briefs SET posted_to_slack=1 WHERE id=?", (brief_id,))
 
 
 def get_booking(bid: str) -> Optional[dict]:
@@ -222,7 +244,8 @@ def get_booking(bid: str) -> Optional[dict]:
 def state() -> list:
     with _lock, _conn() as c:
         return [dict(r) for r in c.execute(
-            "SELECT email, bid, company, thread_count, thread_hash, meeting_at, meeting_source, booked_at, "
+            "SELECT email, bid, company, lead_id, campaign_id, thread_count, thread_hash, thread_updated_at, "
+            "meeting_at, meeting_source, booked_at, "
             "(SELECT COUNT(*) FROM briefs WHERE briefs.email=bookings.email) AS briefs FROM bookings")]
 
 def posted_recently(email: str, hours: int = 24) -> bool:

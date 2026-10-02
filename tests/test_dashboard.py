@@ -29,6 +29,7 @@ if "weasyprint" not in sys.modules:
     sys.modules["weasyprint"] = stub
 
 import main  # noqa: E402
+REAL_RUN_BRIEF = main.run_brief
 import store  # noqa: E402
 from bookings import booking_from_payload, normalize_thread, is_booked_event, is_marco_campaign  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -199,6 +200,53 @@ def test_relay_fires_marco_brief_and_still_forwards():
     time.sleep(0.5)
     assert fwd == ["ev-relay-1", "ev-relay-2"]
     assert calls and calls[0] == ("Adam Zilberbaum", "smartlead-booked")
+
+
+def test_booked_brief_posts_short_notice_with_link():
+    sent = []
+
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+    main.requests.post = lambda url, json=None, timeout=None, **kw: (sent.append((url, json)), R())[1]
+    main.SLACK_WEBHOOK_URL = "https://hooks.slack.test/x"
+    main.overview_from_site = lambda *a, **k: "Makes handheld Dopplers."
+    main.resolve_owner_profile = lambda client, req: ("• Adam is President.", "verified_research", "test")
+    main.generate_assessment = lambda req, status, words=None: {"motivation_hypothesis": "m", "key_strengths": ["s"],
+                                                                 "marco_briefing_note": "n"}
+
+    class _H:
+        def __init__(self, string=""):
+            pass
+
+        def write_pdf(self):
+            return b"%PDF-1.4 real"
+    main.WeasyHTML = _H
+    email = "notice@test.com"
+    store.upsert_booking({"email": email, "company": "Notice Co", "lead_name": "Nina Test", "location": "Texas",
+                         "meeting": {"at": "2026-10-09T15:00:00Z", "source": "thread", "text": "Fri 10am CT"}})
+    req = main.BriefingRequest(lead_name="Nina Test", email=email, company_name="Notice Co", website="notice.com")
+    out = REAL_RUN_BRIEF(req, [], source="smartlead-booked", store_brief=True)
+    assert out["status"] == "success"
+    assert len(sent) == 1, sent
+    url, payload = sent[0]
+    b = store.get_booking(store.bid_for(email))
+    txt = json.dumps(payload)
+    assert url == "https://hooks.slack.test/x"
+    assert "Call booked: Notice Co" in txt and "/b/" + b["share_token"] in txt and "10:00 AM CT" in txt
+    assert "Pre-Call Brief" not in txt and "Deal" not in txt  # the long card is gone
+    assert store.posted_recently(email)
+    # the shared link opens that booking without the site key, read-only, and the PDF comes from the cache
+    c = TestClient(main.app)
+    page = c.get(f"/b/{b['share_token']}").text
+    assert "Notice Co" in page and "Makes handheld Dopplers." in page and "Save time" not in page and "All booked calls" not in page
+    calls = []
+    main.dashboard._hooks["render_pdf"] = lambda *a: (calls.append(1), b"%PDF-1.4 rendered")[1]
+    pdf = c.get(f"/b/{b['share_token']}/pdf")
+    assert pdf.status_code == 200 and pdf.content == b"%PDF-1.4 real" and calls == []  # pre-warmed at build time
+    assert c.get("/b/not-a-token").status_code == 401
 
 
 if __name__ == "__main__":

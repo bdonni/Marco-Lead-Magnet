@@ -225,7 +225,7 @@ def page(title: str, body: str) -> HTMLResponse:
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
 <title>{e(title)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>{CSS}</style></head><body><div class="wrap">{body}
 <div class="foot">Prepared for Carrara Strategy by Gamic · refreshed live from bookings</div></div></body></html>"""
     return HTMLResponse(doc, headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"})
@@ -299,13 +299,15 @@ document.querySelectorAll('#rows tr').forEach(r=>{{r.style.display=!v||r.dataset
     return page("Pre-Call Briefs · Carrara Strategy", body)
 
 
-@router.get("/briefs/{bid}", response_class=HTMLResponse)
-def brief_detail(request: Request, bid: str):
-    if not _viewer(request):
-        return locked()
-    b = store.get_booking(bid)
-    if not b:
-        raise HTTPException(status_code=404, detail="not found")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://marco-lead-magnet-production.up.railway.app").rstrip("/")
+
+
+def share_link(b: Optional[dict]) -> str:
+    """Per-booking link for Slack: opens that one booking without the site key."""
+    return f"{PUBLIC_BASE_URL}/b/{b['share_token']}" if b and b.get("share_token") else f"{PUBLIC_BASE_URL}/briefs"
+
+
+def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResponse:
     br = b.get("brief") or {}
     req = br.get("request") or {}
     a = br.get("assessment") or {}
@@ -320,7 +322,8 @@ def brief_detail(request: Request, bid: str):
         call = "<div class='big'>Time not set</div><small class='muted'>Not found in the email thread yet. Add it below.</small>"
     d0 = _dt(b.get("meeting_at"))
     d_ct = d0.astimezone(CT) if d0 else None
-    form = f"""<form method="post" action="/briefs/{e(bid)}/meeting">
+    bid = b["bid"]
+    form = "" if not editable else f"""<form method="post" action="/briefs/{e(bid)}/meeting">
 <input type="date" name="date" value="{d_ct.strftime('%Y-%m-%d') if d_ct else ''}" required>
 <input type="time" name="time" value="{d_ct.strftime('%H:%M') if d_ct else ''}" required>
 <select name="tz">{''.join(f"<option{' selected' if k == 'CT' else ''}>{k}</option>" for k in TZ_CHOICES)}</select>
@@ -353,7 +356,7 @@ def brief_detail(request: Request, bid: str):
         news = req.get("recent_news")
         if news and news.strip().rstrip(".").lower() not in ("no significant news found", "no news found", "none", "n/a"):
             secs.append(f"<div class='sec'><h2>Recent developments</h2>{_para(news)}</div>")
-        pdf = (f"<a class='btn' href='/briefs/{e(bid)}/pdf'>Download PDF</a>" if _hooks["render_pdf"] else "")
+        pdf = (f"<a class='btn' href='{e(pdf_url)}'>Download PDF</a>" if _hooks["render_pdf"] else "")
         posted = " · posted to Slack" if br.get("posted_to_slack") else ""
         brief_html = f"""<div class="card"><div class="briefhead"><div><b>Pre-call brief</b><br>
 <small class="muted">Generated {e(_fmt_stamp(br.get('created_at')))}{posted}</small></div>{pdf}</div>{''.join(secs)}</div>"""
@@ -370,13 +373,39 @@ def brief_detail(request: Request, bid: str):
     thread_html = (f"<div class='card thread'><div class='briefhead'><b>Email thread</b><small class='muted'>{len(msgs)} emails</small></div>{''.join(msgs)}</div>"
                    if msgs else "<div class='card empty'>No emails stored for this booking yet.</div>")
 
-    body = f"""<a class="back" href="/briefs">← All booked calls</a>
+    back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else ""
+    body = f"""{back_link}
 <div class="card hero"><div><h1>{e(b.get('company') or '(company unknown)')}</h1>
 <div class="sub">{e(b.get('lead_name') or '')}{(' · ' + e(b.get('title'))) if b.get('title') else ''} · booked {e(_fmt_day(b.get('booked_at')))}</div>
 <div class="chips">{''.join(chips)}</div></div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
 <div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
     return page(f"{b.get('company') or 'Booking'} · Pre-Call Brief", body)
+
+
+@router.get("/briefs/{bid}", response_class=HTMLResponse)
+def brief_detail(request: Request, bid: str, key: Optional[str] = None):
+    if key is not None:
+        if not _ok(key, VIEW_KEY_SHA256):
+            return locked()
+        r = RedirectResponse(f"/briefs/{bid}", status_code=303)
+        r.set_cookie(COOKIE, key, max_age=180 * 86400, httponly=True, secure=True, samesite="lax")
+        return r
+    if not _viewer(request):
+        return locked()
+    b = store.get_booking(bid)
+    if not b:
+        raise HTTPException(status_code=404, detail="not found")
+    return render_detail(b, True, f"/briefs/{bid}/pdf", True)
+
+
+@router.get("/b/{token}", response_class=HTMLResponse)
+def shared_detail(request: Request, token: str):
+    b = store.get_booking_by_token(token)
+    if not b:
+        return locked()
+    viewer = _viewer(request)
+    return render_detail(b, viewer, f"/b/{token}/pdf", viewer)
 
 
 @router.post("/briefs/{bid}/meeting")
@@ -397,18 +426,43 @@ def set_meeting(request: Request, bid: str, date: str = Form(...), time: str = F
     return RedirectResponse(f"/briefs/{bid}", status_code=303)
 
 
+PDF_DIR = os.path.join(os.path.dirname(store.DB_PATH), "pdf")
+
+
+def _pdf_response(b: Optional[dict]) -> Response:
+    """PDFs are rendered once per brief and cached on the volume, so repeat opens are instant."""
+    if not b or not b.get("brief") or not _hooks["render_pdf"]:
+        raise HTTPException(status_code=404, detail="no brief")
+    br = b["brief"]
+    path = os.path.join(PDF_DIR, f"{br['id']}.pdf")
+    try:
+        with open(path, "rb") as fh:
+            pdf = fh.read()
+    except OSError:
+        pdf = _hooks["render_pdf"](br.get("request") or {}, br.get("assessment") or {}, br.get("owner_status") or "")
+        try:
+            os.makedirs(PDF_DIR, exist_ok=True)
+            with open(path + ".tmp", "wb") as fh:
+                fh.write(pdf)
+            os.replace(path + ".tmp", path)
+        except OSError:
+            pass
+    name = "".join(ch for ch in (b.get("company") or "brief") if ch.isalnum() or ch in " -_").strip().replace(" ", "_")
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="Pre-Call_Brief_{name}.pdf"',
+                             "Cache-Control": "private, max-age=3600"})
+
+
 @router.get("/briefs/{bid}/pdf")
 def brief_pdf(request: Request, bid: str):
     if not _viewer(request):
         return locked()
-    b = store.get_booking(bid)
-    if not b or not b.get("brief") or not _hooks["render_pdf"]:
-        raise HTTPException(status_code=404, detail="no brief")
-    br = b["brief"]
-    pdf = _hooks["render_pdf"](br.get("request") or {}, br.get("assessment") or {}, br.get("owner_status") or "")
-    name = "".join(ch for ch in (b.get("company") or "brief") if ch.isalnum() or ch in " -_").strip().replace(" ", "_")
-    return Response(pdf, media_type="application/pdf",
-                    headers={"Content-Disposition": f'inline; filename="Pre-Call_Brief_{name}.pdf"'})
+    return _pdf_response(store.get_booking(bid))
+
+
+@router.get("/b/{token}/pdf")
+def shared_pdf(token: str):
+    return _pdf_response(store.get_booking_by_token(token))
 
 
 # ---------------------------------------------------------------------------

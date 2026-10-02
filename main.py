@@ -10,6 +10,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, model_validator
 from anthropic import Anthropic
 from weasyprint import HTML as WeasyHTML
@@ -27,6 +28,7 @@ SMARTLEAD_API_KEY = os.environ.get("SMARTLEAD_API_KEY", "")
 MEETING_MODEL = os.environ.get("MEETING_MODEL", "claude-haiku-4-5")
 
 app = FastAPI()
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 store.init()
@@ -633,6 +635,37 @@ def post_to_slack_debug(req: BriefingRequest, assessment: dict, pdf_bytes: bytes
     """Wrapper that returns debug info from post_to_slack."""
     return post_to_slack(req, assessment, pdf_bytes)
 
+def post_booking_notice(req: BriefingRequest, booking: Optional[dict]) -> dict:
+    """Slack gets a short 'call booked' note with a link to the booking's page on the brief site."""
+    company = safe_str(req.company_name, "Unknown company")
+    lead = safe_str(req.lead_name, "")
+    where = ((booking or {}).get("location") or req.location or "").strip()
+    day, hours = dashboard._fmt_call((booking or {}).get("meeting_at"))
+    when = f"{day} · {hours}" if day else "Time not in the email thread yet"
+    link = dashboard.share_link(booking)
+    who = " · ".join(x for x in (lead, extract_city_state(where)) if x)
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f":calendar: *Call booked: {company}*\n{who}"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*When:* {when}\n<{link}|Open the pre-call brief and email thread>"}},
+    ]
+    payload = {"text": f"Call booked: {company}" + (f" ({lead})" if lead else ""), "blocks": blocks}
+    out = {"link": link}
+    if SLACK_WEBHOOK_URL:
+        r = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+        out["webhook_status"] = r.status_code
+        r.raise_for_status()
+    elif SLACK_BOT_TOKEN and SLACK_CHANNEL_ID:
+        r = requests.post("https://slack.com/api/chat.postMessage", timeout=10,
+                          headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                          json={"channel": SLACK_CHANNEL_ID, "unfurl_links": False, **payload})
+        out["chat"] = r.json().get("ok")
+        if not out["chat"]:
+            raise RuntimeError(f"slack chat.postMessage failed: {r.text[:200]}")
+    else:
+        raise RuntimeError("no Slack destination configured")
+    return out
+
+
 _inflight = set()
 _inflight_lock = threading.Lock()
 
@@ -686,19 +719,28 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
     pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
     if store_brief is None:
         store_brief = not dry_run
-    posted, slack_debug = False, None
-    if not dry_run and post:
-        slack_debug = post_to_slack(req, assessment, pdf_bytes, owner_status)
-        posted = True
+    posted, slack_debug, brief_id = False, None, None
     if store_brief:
-        store.save_brief(req.email, req.company_name, req.lead_name, source + ("-dry" if dry_run else ""),
-                         owner_status, req.model_dump(), assessment, posted)
+        brief_id = store.save_brief(req.email, req.company_name, req.lead_name, source + ("-dry" if dry_run else ""),
+                                    owner_status, req.model_dump(), assessment, False)
+        try:  # pre-warm the site's PDF cache so the first open is instant
+            os.makedirs(dashboard.PDF_DIR, exist_ok=True)
+            with open(os.path.join(dashboard.PDF_DIR, f"{brief_id}.pdf"), "wb") as fh:
+                fh.write(pdf_bytes)
+        except OSError:
+            pass
         if req.email:
             # Smartlead's lead record owns the booking's names; a brief only fills blanks.
             store.upsert_booking({"email": req.email, "lead_name": req.lead_name, "first_name": req.first_name,
                                   "company": req.company_name, "website": req.website, "location": req.location,
                                   "title": req.title, "booked_at": store.now_iso() if booked_now else None,
                                   "names_soft": True})
+    if not dry_run and post:
+        booking = store.get_booking(store.bid_for(req.email)) if req.email else None
+        slack_debug = post_booking_notice(req, booking)
+        posted = True
+        if brief_id:
+            store.mark_posted(brief_id)
     if dry_run:
         return {"status": "dry_run", "company": req.company_name, "lead_name": req.lead_name,
                 "owner_status": owner_status, "owner_reason": why, "owner_profile": owner_text,
