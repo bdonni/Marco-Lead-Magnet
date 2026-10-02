@@ -184,7 +184,8 @@ def test_calendar_only_calls_from_an_outlook_feed():
     feed = {"text": "BEGIN:VCALENDAR\n" + "".join([
         ev("u1", "ABC & HIA Meeting", timedelta(days=2), zoom),
         ev("u2", "Call Antonio (All County)", -timedelta(days=1), loc="(561) 252-7887"),
-        ev("u3", "ABC & PRI Meeting", timedelta(days=3), zoom + " Steve: steve@priorityrisk.com, c.lyons@mailagencybrokerage.com"),
+        ev("u3", "ABC & PRI Meeting", timedelta(days=3), zoom + " Steve: steve@priorityrisk.com, c.lyons@mailagencybrokerage.com",
+           loc="https://us02web.zoom.us/j/3015204743"),
         ev("u4", "Review Lobosco", timedelta(days=1)),
         ev("u5", "Mike & Caleb", timedelta(hours=5)),
         ev("u6", "ABC & OLD Meeting", timedelta(days=4), status="CANCELLED"),
@@ -210,7 +211,8 @@ def test_calendar_only_calls_from_an_outlook_feed():
     ant = store.get_booking(store.bid_for(calendar_sync.placeholder_email("u2")))
     assert (ant["lead_name"], ant["company"]) == ("Antonio", "All County") and "(561) 252-7887" in ant["meeting_text"]
     pri = store.get_booking(store.bid_for("steve@priorityrisk.com"))
-    assert pri["company"] == "PRI" and built == ["steve@priorityrisk.com"]   # an outside email in the invite: brief right away
+    assert pri["company"] == "PRI" and built == ["steve@priorityrisk.com"] and "3015204743" not in pri["meeting_text"]
+    assert "3015204743" not in hia["meeting_text"]   # an outside email in the invite: brief right away
     for uid in ("u4", "u5", "u6", "u7"):
         assert store.get_booking(store.bid_for(calendar_sync.placeholder_email(uid))) is None, uid
     assert calendar_sync.sync_once("https://example.test/cal.ics")["calendar_calls_added"] == 0     # no duplicates

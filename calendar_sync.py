@@ -202,7 +202,8 @@ def invite_hints(ev: dict) -> tuple:
         if _own(em) or any(em.split("@")[1].endswith(h) for h in NOT_PEOPLE) or em in emails:
             continue
         emails.append(em)
-    ph = PHONE_RE.search(ev.get("location") or "") or PHONE_RE.search(text)
+    loc = ev.get("location") or ""  # a phone number only counts in the location; invite bodies carry Zoom meeting ids
+    ph = None if re.search(r"https?://|zoom|teams", loc, re.I) else PHONE_RE.search(loc)
     return emails, (ph.group(0) if ph else None)
 
 

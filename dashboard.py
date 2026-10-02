@@ -480,7 +480,7 @@ agency's website and the brief builds in about a minute.</p>
 <div class="sub">{e(sub)}</div>
 </div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
-<div class="card facts-card"><div class="facts">{facts_html}</div></div>
+{f'<div class="card facts-card"><div class="facts">{facts_html}</div></div>' if facts_html else ''}
 <div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
     return page(f"{b.get('company') or b.get('lead_name') or 'Booking'} · Pre-Call Brief", body)
 
