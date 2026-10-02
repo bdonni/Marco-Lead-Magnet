@@ -184,6 +184,23 @@ def test_meeting_extractor_guards():
     assert extract_meeting(Fake({"agreed": False}), "m", thread, "Colorado") is None
 
 
+def test_relay_fires_marco_brief_and_still_forwards():
+    calls, fwd = [], []
+    main.run_brief = lambda req, notes, **kw: calls.append((req.lead_name, kw.get("source")))
+    main.forward_to_clay = lambda to, payload: fwd.append(payload.get("event_id"))
+    c = fresh_client()
+    clay = "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-df38f22f-fd6a-47ba-a8de-058e7af56462"
+    p1 = {**PAYLOAD, "event_id": "ev-relay-1", "lead_data": {**PAYLOAD["lead_data"], "email": "new@lead.com"}}
+    r = c.post("/hooks/smartlead-slim", params={"to": clay}, json=p1)
+    assert r.json()["marco"] is True
+    p2 = {**PAYLOAD, "event_id": "ev-relay-2", "campaign_name": "GMC - PE NAMED 25/09"}
+    r2 = c.post("/hooks/smartlead-slim", params={"to": clay}, json=p2)
+    assert r2.json()["marco"] is False
+    time.sleep(0.5)
+    assert fwd == ["ev-relay-1", "ev-relay-2"]
+    assert calls and calls[0] == ("Adam Zilberbaum", "smartlead-booked")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

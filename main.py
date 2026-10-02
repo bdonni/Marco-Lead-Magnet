@@ -771,16 +771,8 @@ def _handle_booked(bk: dict, dry_run: bool):
             release(email)
 
 
-@app.post("/hooks/smartlead-booked")
-async def smartlead_booked(request: Request, dry_run: bool = False):
-    """Smartlead account webhook (Lead category updated). A Marco/CRR lead tagged Booked gets its brief
-    built and posted at once, and its booking + email thread land on the brief site."""
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="body must be JSON")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="body must be a JSON object")
+def accept_booked(payload: dict, dry_run: bool = False) -> dict:
+    """A Marco/CRR lead tagged Booked: store the booking + thread and build (and post) the brief now."""
     if not is_booked_event(payload):
         return {"ok": True, "ignored": "not a Booked category event"}
     if not is_marco_event(payload, store.campaign_ids()):
@@ -796,6 +788,18 @@ async def smartlead_booked(request: Request, dry_run: bool = False):
                       "dry_run": dry_run}), flush=True)
     threading.Thread(target=_handle_booked, args=(bk, dry_run), daemon=True).start()
     return {"ok": True, "queued": True}
+
+
+@app.post("/hooks/smartlead-booked")
+async def smartlead_booked(request: Request, dry_run: bool = False):
+    """Direct Smartlead webhook for Booked events (Marco leads only; everything else is ignored)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    return accept_booked(payload, dry_run)
 
 
 @app.post("/api/briefs/generate")
@@ -838,8 +842,14 @@ async def smartlead_slim(request: Request, to: str = ""):
                                               ("to_email", "event_type", "event_timestamp", "campaign_id"))
     if seen_recently(f"relay:{to[-36:]}:{key}", 6 * 3600):
         return {"ok": True, "duplicate": True}
+    # Marco's Booked leads get their brief straight away; every event still goes on to Clay as before.
+    marco = {}
+    try:
+        marco = accept_booked(payload)
+    except Exception as e:
+        print(json.dumps({"event": "booked_accept_error", "error": str(e)[:300]}), flush=True)
     threading.Thread(target=forward_to_clay, args=(to, payload), daemon=True).start()
-    return {"ok": True, "queued": True}
+    return {"ok": True, "queued": True, "marco": marco.get("queued", False)}
 
 
 @app.get("/health")
