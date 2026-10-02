@@ -86,6 +86,8 @@ def company_from_domain(dom: str) -> Optional[str]:
     return " ".join(w.capitalize() for w in words) or None
 
 
+HONORIFICS = {"dr", "mr", "mrs", "ms", "miss", "mx", "prof", "sir", "rev"}
+
 ROLE_LOCALS = {"info", "sales", "office", "admin", "contact", "hello", "support", "service", "team",
                "accounts", "billing", "inquiries", "enquiries", "mail", "orders", "help"}
 
@@ -120,6 +122,10 @@ def normalize(req) -> list:
 
     if req.email and "@" not in req.email:
         req.email = None
+    for f in ("lead_name", "first_name"):  # a bare title ("Dr", "Mr") is not a name
+        v = (getattr(req, f) or "").strip().rstrip(".").lower()
+        if v in HONORIFICS:
+            setattr(req, f, None)
     email_dom = domain_of(req.email)
 
     if not req.website and email_dom and email_dom not in GENERIC_EMAIL_DOMAINS:
