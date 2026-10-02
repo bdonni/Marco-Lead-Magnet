@@ -2,16 +2,23 @@ import os
 import re
 import json
 import base64
+import threading
+import traceback
 import requests
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, model_validator
 from anthropic import Anthropic
 from weasyprint import HTML as WeasyHTML
 
 from identity import resolve_owner_profile
+from intake import (flatten, normalize, seen_recently, brief_key, overview_from_site, domain_of,
+                    CLAY_WEBHOOK_RE, forward_to_clay)
+
+BRIEF_DEDUPE_SECONDS = int(os.environ.get("BRIEF_DEDUPE_SECONDS", "10800"))
+OVERVIEW_MODEL = os.environ.get("OVERVIEW_MODEL", "claude-sonnet-4-6")
 
 app = FastAPI()
 
@@ -42,6 +49,14 @@ class BriefingRequest(BaseModel):
     recent_news:      Optional[str] = None
     owner_summary:    Optional[str] = None
     title:            Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce(cls, data):
+        # Clay can send numbers, objects or JSON-shaped text; every field becomes readable text or None.
+        if isinstance(data, dict):
+            return {k: flatten(v) for k, v in data.items()}
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -608,25 +623,81 @@ def post_to_slack_debug(req: BriefingRequest, assessment: dict, pdf_bytes: bytes
     """Wrapper that returns debug info from post_to_slack."""
     return post_to_slack(req, assessment, pdf_bytes)
 
+def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False) -> dict:
+    if not req.business_summary and req.website:
+        overview = overview_from_site(claude_client, OVERVIEW_MODEL, req.company_name, domain_of(req.website))
+        if overview:
+            req.business_summary = overview
+            notes.append("business overview from company site")
+    owner_text, owner_status, why = resolve_owner_profile(claude_client, req)
+    print(json.dumps({"event": "owner_identity", "company": req.company_name, "contact": req.lead_name,
+                      "status": owner_status, "reason": why}), flush=True)
+    req.owner_summary = owner_text
+    assessment   = generate_assessment(req, owner_status)
+    html_content = build_pdf_html(req, assessment, owner_status)
+    pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
+    if dry_run:
+        return {"status": "dry_run", "company": req.company_name, "lead_name": req.lead_name,
+                "owner_status": owner_status, "owner_reason": why, "owner_profile": owner_text,
+                "business_summary": req.business_summary, "founded_year": req.founded_year,
+                "location": req.location, "notes": notes, "pdf_bytes": len(pdf_bytes), "assessment": assessment}
+    slack_debug  = post_to_slack(req, assessment, pdf_bytes, owner_status)
+    print(json.dumps({"event": "brief_posted", "company": req.company_name, "contact": req.lead_name,
+                      "owner_status": owner_status, "notes": notes,
+                      "slack_ok": bool((slack_debug or {}).get("step3", {}).get("ok"))}), flush=True)
+    return {"status": "success", "company": req.company_name, "owner_status": owner_status, "slack_debug": slack_debug}
+
+
+def _run_brief_logged(req: BriefingRequest, notes: list):
+    try:
+        run_brief(req, notes)
+    except Exception as e:
+        print(json.dumps({"event": "brief_failed", "company": req.company_name, "contact": req.lead_name,
+                          "error": str(e)[:300], "trace": traceback.format_exc()[-1500:]}), flush=True)
+
+
 @app.post("/generate-briefing")
-async def generate_briefing(req: BriefingRequest, dry_run: bool = False):
+def generate_briefing(req: BriefingRequest, dry_run: bool = False, force: bool = False):
+    notes = normalize(req)
     if not req.company_name and not req.lead_name:
         raise HTTPException(status_code=422, detail="At least company_name or lead_name is required.")
+    print(json.dumps({"event": "brief_request", "company": req.company_name, "contact": req.lead_name,
+                      "email": req.email, "dry_run": dry_run, "notes": notes,
+                      "blank": [f for f in ("business_summary", "owner_summary", "founded_year", "location", "website")
+                                if not getattr(req, f)]}), flush=True)
+    if dry_run:
+        try:
+            return run_brief(req, notes, dry_run=True)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    # Ack at once and build in the background: Clay's HTTP column retries slow calls, and a retry
+    # would post a second card. Same lead + company inside the dedupe window is skipped.
+    if not force and seen_recently(brief_key(req), BRIEF_DEDUPE_SECONDS):
+        print(json.dumps({"event": "brief_duplicate_skipped", "company": req.company_name,
+                          "contact": req.lead_name}), flush=True)
+        return {"status": "duplicate_skipped", "company": req.company_name}
+    threading.Thread(target=_run_brief_logged, args=(req, notes), daemon=True).start()
+    return {"status": "queued", "company": req.company_name, "contact": req.lead_name}
+
+
+@app.post("/hooks/smartlead-slim")
+async def smartlead_slim(request: Request, to: str = ""):
+    """Smartlead webhook -> Clay webhook, minus the thread history that made Clay answer 413.
+    The Clay target rides in the hook URL (?to=...), so no webhook address lives in this public repo."""
+    if not CLAY_WEBHOOK_RE.match(to or ""):
+        raise HTTPException(status_code=400, detail="to must be a Clay webhook URL")
     try:
-        owner_text, owner_status, why = resolve_owner_profile(claude_client, req)
-        print(json.dumps({"event": "owner_identity", "company": req.company_name, "contact": req.lead_name,
-                          "status": owner_status, "reason": why}), flush=True)
-        req.owner_summary = owner_text
-        assessment   = generate_assessment(req, owner_status)
-        html_content = build_pdf_html(req, assessment, owner_status)
-        pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
-        if dry_run:
-            return {"status": "dry_run", "company": req.company_name, "owner_status": owner_status,
-                    "owner_reason": why, "owner_profile": owner_text, "assessment": assessment}
-        slack_debug  = post_to_slack(req, assessment, pdf_bytes, owner_status)
-        return {"status": "success", "company": req.company_name, "owner_status": owner_status, "slack_debug": slack_debug}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    key = payload.get("event_id") or "|".join(str(payload.get(k, "")) for k in
+                                              ("to_email", "event_type", "event_timestamp", "campaign_id"))
+    if seen_recently(f"relay:{to[-36:]}:{key}", 6 * 3600):
+        return {"ok": True, "duplicate": True}
+    threading.Thread(target=forward_to_clay, args=(to, payload), daemon=True).start()
+    return {"ok": True, "queued": True}
 
 
 @app.get("/health")
