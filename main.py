@@ -20,6 +20,7 @@ import store
 import tenant
 import dashboard
 import calendar_sync
+import calendly
 from identity import resolve_owner_profile
 from bookings import is_booked_event, is_tenant_event, booking_from_payload, prospect_words, extract_meeting
 from research import company_research
@@ -703,7 +704,7 @@ FOUNDED_RE = re.compile(r"(?:founded|established|since|incorporated|started)\D{0
 
 def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: Optional[list] = None,
               source: str = "clay", post: bool = True, store_brief: Optional[bool] = None,
-              booked_now: bool = False) -> dict:
+              booked_now: bool = False, extra_words: Optional[str] = None) -> dict:
     apply_lead_record(req, smartlead_lead(req.email, SMARTLEAD_API_KEY), notes)
     if thread is None and req.email:
         b = store.get_booking(store.bid_for(req.email))
@@ -735,6 +736,8 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
                       "status": owner_status, "reason": why}), flush=True)
     req.owner_summary = owner_text
     words = prospect_words(thread or [])
+    if extra_words:
+        words = (words + "\n\n" if words else "") + "Their answers on the booking form:\n" + extra_words
     assessment   = generate_assessment(req, owner_status, words or None, research.get("facts"))
     html_content = build_pdf_html(req, assessment, owner_status)
     pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
@@ -898,6 +901,57 @@ async def smartlead_booked(request: Request, dry_run: bool = False):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     return accept_booked(payload, dry_run)
+
+
+def _handle_calendly(bk: dict):
+    email = bk["email"]
+    dashboard.ingest_booking({k: v for k, v in bk.items() if k not in ("qa", "invitee_uri", "rescheduled")}, extract=False)
+    req = BriefingRequest(lead_name=bk.get("lead_name"), first_name=bk.get("first_name"), email=email,
+                          company_name=bk.get("company"))
+    notes = normalize(req)
+    if not claim(email):
+        print(json.dumps({"event": "brief_duplicate_skipped", "contact": req.lead_name, "via": "calendly"}), flush=True)
+        return
+    try:
+        run_brief(req, notes, source="calendly", store_brief=True, extra_words=calendly.qa_text(bk.get("qa") or []))
+    except Exception as e:
+        print(json.dumps({"event": "brief_failed", "contact": req.lead_name, "via": "calendly", "error": str(e)[:300],
+                          "trace": traceback.format_exc()[-1500:]}), flush=True)
+    finally:
+        release(email)
+
+
+@app.post("/hooks/calendly")
+async def calendly_hook(request: Request):
+    """Calendly invitee.created / invitee.canceled. Signed with the key set when the subscription was made."""
+    raw = await request.body()
+    if not calendly.verify(raw, request.headers.get("calendly-webhook-signature"), store.get_setting("calendly_signing_key")):
+        raise HTTPException(status_code=401, detail="bad signature")
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    event, payload = data.get("event"), data.get("payload") or {}
+    bk = calendly.booking_from_invitee(payload)
+    own = [d.lower() for d in (tenant.get("own_domains") or [])] + ["gamicmedia.com"]
+    if not bk["email"] or any(bk["email"].endswith("@" + d) for d in own):
+        return {"ok": True, "ignored": "no outside invitee"}
+    if seen_recently(f"calendly:{event}:{bk.get('invitee_uri')}", 6 * 3600):
+        return {"ok": True, "duplicate": True}
+    print(json.dumps({"event": "calendly_received", "type": event, "email": bk["email"],
+                      "start": bk["meeting"]["at"], "rescheduled": bk["rescheduled"]}), flush=True)
+    if event == "invitee.canceled":
+        if bk["rescheduled"]:
+            return {"ok": True, "ignored": "rescheduled; the new booking follows"}
+        b = store.get_booking(store.bid_for(bk["email"]))
+        if b and b.get("meeting_at") and bk["meeting"]["at"] and b["meeting_at"] != bk["meeting"]["at"]:
+            return {"ok": True, "ignored": "a different call is on the site for this person"}
+        store.upsert_booking({"email": bk["email"], "hidden": True})
+        return {"ok": True, "hidden": True}
+    if event != "invitee.created" or not bk["meeting"]["at"]:
+        return {"ok": True, "ignored": event}
+    threading.Thread(target=_handle_calendly, args=(bk,), daemon=True).start()
+    return {"ok": True, "queued": True}
 
 
 @app.post("/api/briefs/notify")

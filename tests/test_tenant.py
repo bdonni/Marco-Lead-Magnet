@@ -120,6 +120,44 @@ def test_new_client_never_posts_to_slack_until_switched_on():
     assert r.status_code == 409 and sent == []
 
 
+def test_calendly_booking_creates_call_and_cancel_hides_it():
+    import hmac as _h
+    import hashlib as _hl
+    import calendly
+    store.set_setting("calendly_signing_key", "sign-test")
+    got = []
+    main._handle_calendly = lambda bk: (got.append(bk), main.dashboard.ingest_booking(
+        {k: v for k, v in bk.items() if k not in ("qa", "invitee_uri", "rescheduled")}, extract=False))
+    c = TestClient(main.app)
+
+    def send(event, extra=None):
+        body = json.dumps({"event": event, "payload": {**{
+            "email": "drew@trigonins.com", "name": "Drew Taylor", "first_name": "Drew", "created_at": "2026-10-02T15:00:00.000000Z",
+            "uri": "https://api.calendly.com/scheduled_events/E1/invitees/I1", "rescheduled": False,
+            "questions_and_answers": [{"question": "Agency name", "answer": "Trigon Insurance"},
+                                      {"question": "What would you like to discuss?", "answer": "Valuing my book"}],
+            "scheduled_event": {"uri": "https://api.calendly.com/scheduled_events/E1", "name": "Free Valuation Inquiry",
+                                "start_time": "2026-10-06T15:00:00.000000Z"}}, **(extra or {})}}).encode()
+        t = str(int(time.time()))
+        sig = _h.new(b"sign-test", f"{t}.".encode() + body, _hl.sha256).hexdigest()
+        return c.post("/hooks/calendly", content=body, headers={"content-type": "application/json",
+                                                                "calendly-webhook-signature": f"t={t},v1={sig}"})
+    assert c.post("/hooks/calendly", content=b"{}", headers={"calendly-webhook-signature": "t=1,v1=bad"}).status_code == 401
+    assert send("invitee.created").json().get("queued")
+    time.sleep(0.3)
+    b = store.get_booking(store.bid_for("drew@trigonins.com"))
+    assert b["meeting_at"] == "2026-10-06T15:00:00Z" and b["meeting_source"] == "calendar" and b["company"] == "Trigon Insurance"
+    assert got[0]["qa"][1] == ("What would you like to discuss?", "Valuing my book")
+    assert calendly.qa_text(got[0]["qa"]).startswith("Agency name: Trigon Insurance")
+    other = {"uri": "https://api.calendly.com/scheduled_events/E0/invitees/I0",
+             "scheduled_event": {"uri": "https://api.calendly.com/scheduled_events/E0", "name": "Free Valuation Inquiry",
+                                 "start_time": "2026-10-03T15:00:00.000000Z"}}
+    assert send("invitee.canceled", other).json().get("ignored")      # an older call, not the one on the site
+    assert store.get_booking(store.bid_for("drew@trigonins.com"))["hidden"] == 0
+    assert send("invitee.canceled", {"uri": "https://api.calendly.com/scheduled_events/E1/invitees/I2"}).json().get("hidden")
+    assert store.get_booking(store.bid_for("drew@trigonins.com"))["hidden"] == 1
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

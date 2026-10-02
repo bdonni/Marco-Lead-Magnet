@@ -568,7 +568,7 @@ async def api_ingest(request: Request):
     if isinstance(data.get("settings"), dict):
         for k, v in data["settings"].items():
             if k in ("calendar_ics_url", "tenant_config", "tenant_logo_b64", "view_key_sha256", "slack_webhook_url",
-                     "slack_channel_id", "tenant_routes"):
+                     "slack_channel_id", "tenant_routes", "calendly_signing_key"):
                 store.set_setting(k, (json.dumps(v) if isinstance(v, (dict, list)) else v) or None)
                 out.setdefault("settings", []).append(k)
     if data.get("calendar_sync"):
