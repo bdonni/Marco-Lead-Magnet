@@ -446,6 +446,11 @@ def set_meeting(request: Request, bid: str, date: str = Form(...), time: str = F
 
 
 PDF_DIR = os.path.join(os.path.dirname(store.DB_PATH), "pdf")
+PDF_VERSION = "v3"  # bump when the PDF layout changes so cached copies are rebuilt
+
+
+def pdf_path(brief_id) -> str:
+    return os.path.join(PDF_DIR, f"{brief_id}-{PDF_VERSION}.pdf")
 
 
 def _pdf_response(b: Optional[dict]) -> Response:
@@ -453,7 +458,7 @@ def _pdf_response(b: Optional[dict]) -> Response:
     if not b or not b.get("brief") or not _hooks["render_pdf"]:
         raise HTTPException(status_code=404, detail="no brief")
     br = b["brief"]
-    path = os.path.join(PDF_DIR, f"{br['id']}.pdf")
+    path = pdf_path(br["id"])
     try:
         with open(path, "rb") as fh:
             pdf = fh.read()
