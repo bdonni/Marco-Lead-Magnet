@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 import store
 import briefview
@@ -93,22 +93,28 @@ def _fmt_stamp(iso: Optional[str]) -> str:
 
 
 def _rel(iso: Optional[str]) -> str:
+    """'in 40 min', 'today, in 3h', 'tomorrow', 'in 5 days', 'now', 'earlier today', 'yesterday', '3 days ago'."""
     d = _dt(iso)
     if not d:
         return ""
     now = datetime.now(timezone.utc)
     secs = (d - now).total_seconds()
+    days = (d.astimezone(CT).date() - now.astimezone(CT).date()).days
     if -5400 < secs < 0:
         return "now"
-    if 0 <= secs < 3600:
-        return f"in {max(1, int(secs // 60))} min"
-    if 0 <= secs < 86400 and d.astimezone(CT).date() == now.astimezone(CT).date():
-        return f"today, in {int(secs // 3600)}h"
-    if d.astimezone(CT).date() == (now.astimezone(CT) + timedelta(days=1)).date():
-        return "tomorrow"
-    if secs > 0:
-        return f"in {int(secs // 86400)} days" if secs >= 2 * 86400 else "in 1 day"
-    return f"{int(-secs // 86400)}d ago" if -secs >= 86400 else "earlier today"
+    if secs >= 0:
+        if secs < 3600:
+            return f"in {max(1, int(secs // 60))} min"
+        if days == 0:
+            return f"today, in {int(secs // 3600)}h"
+        if days == 1:
+            return "tomorrow"
+        return f"in {days} days"
+    if days == 0:
+        return "earlier today"
+    if days == -1:
+        return "yesterday"
+    return f"{-days} days ago"
 
 
 def e(s) -> str:
@@ -156,11 +162,11 @@ def _ordered(rows: list) -> list:
 # ---------------------------------------------------------------------------
 
 CSS = """
-:root{--bg:#f6f7f9;--panel:#fff;--ink:#14171c;--muted:#5d6672;--line:#e3e6ea;--soft:#f0f2f5;--accent:#1f4fd8;
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#14171c;--muted:#5d6672;--line:#e3e6ea;--soft:#f0f2f5;--accent:#144e83;
 --accent-ink:#fff;--ok:#127a46;--ok-bg:#e6f5ec;--warn:#9a5b00;--warn-bg:#fff3dc;--bad:#b42318;--bad-bg:#fdecea;
 --chip:#eef1f6;--shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1115;--panel:#171a21;--ink:#e8eaee;
---muted:#9aa3ae;--line:#2a2f39;--soft:#1d212a;--accent:#6b8cff;--accent-ink:#0b0d12;--ok:#4ade80;--ok-bg:#12261b;
+--muted:#9aa3ae;--line:#2a2f39;--soft:#1d212a;--accent:#8fb3e0;--accent-ink:#0b0d12;--ok:#4ade80;--ok-bg:#12261b;
 --warn:#fbbf24;--warn-bg:#2a2112;--bad:#f87171;--bad-bg:#2c1515;--chip:#232834;--shadow:none}}
 *{box-sizing:border-box}html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:15px/1.55 Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
@@ -194,7 +200,8 @@ tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{backgrou
 .back{display:inline-block;margin-bottom:14px;font-size:14px}
 .hero{padding:22px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
-.facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px 18px;margin-top:14px}
+.facts-card{margin-top:14px;padding:16px 22px}
+.facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px 22px}
 .fact span{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .fact b{font-weight:600;font-size:14px;word-break:break-word}
 .chip{background:var(--chip);border-radius:6px;padding:3px 9px;font-size:13px;color:var(--ink)}
@@ -203,7 +210,7 @@ tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{backgrou
 .calltime form{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .calltime input,.calltime select{font:inherit;font-size:13px;padding:5px 7px;border:1px solid var(--line);border-radius:6px;
 background:var(--panel);color:var(--ink)}
-.btn{font:inherit;font-size:13px;font-weight:600;padding:6px 12px;border-radius:8px;border:1px solid var(--accent);
+.btn{white-space:nowrap;font:inherit;font-size:13px;font-weight:600;padding:6px 12px;border-radius:8px;border:1px solid var(--accent);
 background:var(--accent);color:var(--accent-ink);cursor:pointer}
 .btn.ghost{background:transparent;color:var(--accent)}
 .cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:18px;margin-top:18px}
@@ -218,6 +225,11 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute
 .msg .who{font-weight:700;color:var(--ink)}.msg.reply{background:var(--soft)}
 .msg .body{white-space:pre-wrap;word-wrap:break-word;font-size:14px}
 .foot{margin-top:26px;color:var(--muted);font-size:12.5px;text-align:center}
+.brand{display:flex;gap:16px;align-items:center}
+.logo-tile{background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px 9px;display:inline-flex;box-shadow:var(--shadow);flex:none}
+.logo-tile img{height:58px;width:auto;display:block}
+.brandbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
+.brandbar .logo-tile img{height:40px}.brandbar .back{margin:0}
 @media (max-width:860px){.cols{grid-template-columns:1fr}}
 @media (max-width:700px){.wrap{padding:18px 16px 40px}thead{display:none}table,tbody,tr,td{display:block;width:100%}
 tbody tr{padding:12px 14px;border-bottom:1px solid var(--line)}td{border:0;padding:3px 0}
@@ -228,16 +240,17 @@ td.col-thread{display:none}.search{max-width:none;margin-left:0}}
 def page(title: str, body: str) -> HTMLResponse:
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<link rel="icon" type="image/png" href="/static/carrara-icon.png">
 <title>{e(title)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>{CSS}</style></head><body><div class="wrap">{body}
-<div class="foot">Prepared for Carrara Strategy by Gamic · refreshed live from bookings</div></div></body></html>"""
+<div class="foot">Prepared for Carrara Strategy Group by Gamic · updates as calls are booked</div></div></body></html>"""
     return HTMLResponse(doc, headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"})
 
 
 def locked() -> HTMLResponse:
-    body = """<div class="card empty" style="margin-top:80px"><h1 style="font-size:20px;margin-bottom:6px">Pre-Call Briefs</h1>
+    body = """<div class="card empty" style="margin-top:80px"><span class='logo-tile'><img src='/static/carrara-logo.png' alt='Carrara Strategy Group' width='81' height='76'></span><h1 style="font-size:20px;margin:14px 0 6px">Pre-Call Briefs</h1>
 <p>This page needs your private access link. Ask Gamic to resend it.</p></div>"""
     r = page("Pre-Call Briefs", body)
     r.status_code = 401
@@ -294,7 +307,7 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
     table = (f"""<div class="card"><table><thead><tr><th>Call</th><th>Company</th><th>Contact</th><th>Booked</th>
 <th>Brief</th><th class="col-thread">Thread</th></tr></thead><tbody id="rows">{''.join(trs)}</tbody></table></div>"""
              if trs else "<div class='card empty'>Nothing here yet.</div>")
-    body = f"""<header class="top"><div><h1>Pre-Call Briefs</h1><div class="sub">Carrara Strategy · every booked call, its email thread and the brief</div></div>
+    body = f"""<header class="top"><div class="brand"><span class="logo-tile"><img src="/static/carrara-logo.png" alt="Carrara Strategy Group" width="81" height="76"></span><div><h1>Pre-Call Briefs</h1><div class="sub">Carrara Strategy Group · every booked call, its email thread and the brief</div></div></div>
 <div class="stats"><div class="stat"><b>{week}</b><span>calls next 7 days</span></div>
 <div class="stat"><b>{counts['upcoming']}</b><span>upcoming</span></div><div class="stat"><b>{len(rows)}</b><span>booked in total</span></div></div></header>
 <div class="bar"><div class="tabs">{tabs}</div><input class="search" id="q" placeholder="Search company, contact, state" autocomplete="off"></div>
@@ -378,12 +391,13 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     thread_html = (f"<div class='card thread'><div class='briefhead'><b>Email thread</b><small class='muted'>{len(msgs)} emails</small></div>{''.join(msgs)}</div>"
                    if msgs else "<div class='card empty'>No emails stored for this booking yet.</div>")
 
-    back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else ""
-    body = f"""{back_link}
+    back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else "<span></span>"
+    body = f"""<div class="brandbar">{back_link}<span class="logo-tile"><img src="/static/carrara-logo.png" alt="Carrara Strategy Group" width="81" height="76"></span></div>
 <div class="card hero"><div><h1>{e(b.get('company') or '(company unknown)')}</h1>
 <div class="sub">{e(b.get('lead_name') or '')}{(' · ' + e(b.get('title'))) if b.get('title') else ''} · booked {e(_fmt_day(b.get('booked_at')))}</div>
-<div class="facts">{facts_html}</div></div>
+</div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
+<div class="card facts-card"><div class="facts">{facts_html}</div></div>
 <div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
     return page(f"{b.get('company') or 'Booking'} · Pre-Call Brief", body)
 
@@ -522,3 +536,15 @@ async def api_ingest(request: Request):
 def api_state(request: Request):
     _ingest(request)
     return {"bookings": store.state()}
+
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+STATIC_FILES = {"carrara-logo.png", "carrara-icon.png"}
+
+
+@router.get("/static/{name}")
+def static_file(name: str):
+    if name not in STATIC_FILES:
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(os.path.join(STATIC_DIR, name), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=604800"})
