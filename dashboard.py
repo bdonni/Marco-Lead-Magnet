@@ -294,7 +294,7 @@ def locked() -> HTMLResponse:
 # ---------------------------------------------------------------------------
 
 @router.get("/briefs", response_class=HTMLResponse)
-def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcoming"):
+def briefs_index(request: Request, key: Optional[str] = None, view: Optional[str] = None):
     if key is not None:
         if not _ok(key, _view_hash()):
             return locked()
@@ -308,7 +308,8 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
     counts = {k: sum(1 for b in rows if _bucket(b) == k) for k in ("upcoming", "unset", "past")}
     now = datetime.now(timezone.utc)
     week = sum(1 for b in rows if _bucket(b) == "upcoming" and _dt(b["meeting_at"]) < now + timedelta(days=7))
-    view = view if view in ("upcoming", "unset", "past", "all") else "upcoming"
+    if view not in ("upcoming", "unset", "past", "all"):  # no choice made: open on upcoming, or on everything if none
+        view = "upcoming" if counts["upcoming"] else "all"
     shown = rows if view == "all" else [b for b in rows if _bucket(b) == view]
 
     trs = []
