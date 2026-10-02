@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 import store
 import briefview
+import calendar_sync
 from bookings import normalize_thread
 
 try:
@@ -192,7 +193,7 @@ padding:12px 14px;border-bottom:1px solid var(--line)}
 td{padding:14px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{background:var(--soft)}
 .when{min-width:118px;white-space:nowrap}.when b{display:block}.when small,.muted{color:var(--muted)}small{font-size:12.5px}
-.co{font-weight:600}.rel{display:inline-block;margin-top:2px;font-size:12px;color:var(--accent);font-weight:600}
+.co{font-weight:600}.warnline{color:var(--warn);font-weight:600}.rel{display:inline-block;margin-top:2px;font-size:12px;color:var(--accent);font-weight:600}
 .badge{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
 .badge.ok{color:var(--ok);background:var(--ok-bg)}.badge.warn{color:var(--warn);background:var(--warn-bg)}
 .badge.bad{color:var(--bad);background:var(--bad-bg)}.badge.neutral{color:var(--muted);background:var(--chip)}
@@ -237,6 +238,16 @@ td.col-thread{display:none}.search{max-width:none;margin-left:0}}
 """
 
 
+def _calendar_status() -> str:
+    ok = _dt(store.get_setting("calendar_last_ok"))
+    if not store.get_setting("calendar_ics_url"):
+        return "call times not linked to Marco's calendar yet"
+    if not ok:
+        return "connecting to Marco's calendar"
+    mins = int((datetime.now(timezone.utc) - ok).total_seconds() // 60)
+    return f"call times from Marco's calendar, checked {'just now' if mins < 1 else f'{mins} min ago'}"
+
+
 def page(title: str, body: str) -> HTMLResponse:
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
@@ -245,7 +256,7 @@ def page(title: str, body: str) -> HTMLResponse:
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>{CSS}</style></head><body><div class="wrap">{body}
-<div class="foot">Prepared for Carrara Strategy Group by Gamic · updates as calls are booked</div></div></body></html>"""
+<div class="foot">Prepared for Carrara Strategy Group by Gamic · {e(_calendar_status())}</div></div></body></html>"""
     return HTMLResponse(doc, headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"})
 
 
@@ -283,7 +294,8 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
     for b in shown:
         day, hours = _fmt_call(b.get("meeting_at"))
         ct_part, _, et_part = hours.partition(" · ")
-        when = (f"<b>{e(day)}</b><small>{e(ct_part)}<br>{e(et_part)}</small><br><span class='rel'>{e(_rel(b.get('meeting_at')))}</span>"
+        unconf = "" if b.get("meeting_source") == "calendar" else "<br><small class='warnline'>not on calendar yet</small>"
+        when = (f"<b>{e(day)}</b><small>{e(ct_part)}<br>{e(et_part)}</small><br><span class='rel'>{e(_rel(b.get('meeting_at')))}</span>{unconf}"
                 if day else "<span class='badge neutral'>Time not set</span>")
         br = b.get("brief")
         if br:
@@ -334,11 +346,15 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     day, hours = _fmt_call(b.get("meeting_at"))
     if day:
         src = b.get("meeting_source")
-        note = (f"From the email thread: “{e(b.get('meeting_quote') or b.get('meeting_text'))}”" if src == "thread"
-                else "Set by hand")
+        if src == "calendar":
+            note = f"On Marco's calendar: {e(b.get('meeting_text') or 'event')}"
+        elif src == "manual":
+            note = "Set by hand · not on Marco's calendar yet"
+        else:
+            note = f"Not on Marco's calendar yet · from the email thread: “{e(b.get('meeting_quote') or b.get('meeting_text'))}”"
         call = f"<div class='big'>{e(day)}</div><div>{e(hours)}</div><small class='muted'>{e(_rel(b.get('meeting_at')))} · {note}</small>"
     else:
-        call = "<div class='big'>Time not set</div><small class='muted'>Not found in the email thread yet. Add it below.</small>"
+        call = "<div class='big'>Time not set</div><small class='muted'>Not on Marco's calendar yet. It appears here as soon as it is.</small>"
     d0 = _dt(b.get("meeting_at"))
     d_ct = d0.astimezone(CT) if d0 else None
     bid = b["bid"]
@@ -527,6 +543,13 @@ async def api_ingest(request: Request):
         out["campaigns"] = store.set_campaigns(data["campaigns"])
     if isinstance(data.get("purge"), list):
         out["purged"] = store.purge(data["purge"])
+    if isinstance(data.get("settings"), dict):
+        for k, v in data["settings"].items():
+            if k in ("calendar_ics_url",):
+                store.set_setting(k, v or None)
+                out.setdefault("settings", []).append(k)
+    if data.get("calendar_sync"):
+        out["calendar"] = calendar_sync.sync_once()
     for d in data.get("bookings") or []:
         if ingest_booking(d, extract=bool(data.get("extract", True))):
             out["bookings"] += 1
@@ -554,3 +577,15 @@ def static_file(name: str):
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(os.path.join(STATIC_DIR, name), media_type="image/png",
                         headers={"Cache-Control": "public, max-age=604800"})
+
+
+@router.get("/api/briefs/calendar")
+def api_calendar(request: Request):
+    """Gamic-only: upcoming calendar events that match no booking yet (attendee emails only)."""
+    _ingest(request)
+    try:
+        unmatched = json.loads(store.get_setting("calendar_unmatched") or "[]")
+    except ValueError:
+        unmatched = []
+    return {"connected": bool(store.get_setting("calendar_ics_url")), "last_ok": store.get_setting("calendar_last_ok"),
+            "last_error": store.get_setting("calendar_last_error"), "unmatched": unmatched}

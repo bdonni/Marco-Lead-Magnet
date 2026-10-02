@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS briefs (
   assessment_json TEXT,
   posted_to_slack INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
 CREATE TABLE IF NOT EXISTS campaigns (
   id         INTEGER PRIMARY KEY,
   name       TEXT,
@@ -75,6 +79,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
 CREATE INDEX IF NOT EXISTS briefs_email ON briefs(email);
 CREATE INDEX IF NOT EXISTS briefs_company ON briefs(company);
 """
+
+MEETING_RANK = {"thread": 1, "manual": 2, "calendar": 3}
 
 BOOKING_FIELDS = ("lead_name", "first_name", "title", "company", "website", "location", "campaign_id",
                   "campaign_name", "lead_id")
@@ -107,6 +113,8 @@ def init() -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(bookings)")}
         if "share_token" not in cols:
             c.execute("ALTER TABLE bookings ADD COLUMN share_token TEXT")
+        if "meeting_event_uid" not in cols:
+            c.execute("ALTER TABLE bookings ADD COLUMN meeting_event_uid TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS bookings_share ON bookings(share_token)")
         c.execute("CREATE INDEX IF NOT EXISTS bookings_bid ON bookings(bid)")
         for r in c.execute("SELECT email FROM bookings WHERE share_token IS NULL").fetchall():
@@ -147,9 +155,10 @@ def upsert_booking(d: dict) -> Optional[str]:
                 sets += ["thread_json=?", "thread_count=?", "thread_hash=?", "thread_updated_at=?"]
                 vals += [th, len(d["thread"]), h, ts]
         m = d.get("meeting")
-        if isinstance(m, dict) and (m.get("source") == "manual" or row["meeting_source"] != "manual"):
-            sets += ["meeting_at=?", "meeting_text=?", "meeting_source=?", "meeting_quote=?"]
-            vals += [m.get("at"), m.get("text"), m.get("source"), m.get("quote")]
+        # Marco's calendar beats a time set by hand, which beats one read from the email thread.
+        if isinstance(m, dict) and MEETING_RANK.get(m.get("source"), 0) >= MEETING_RANK.get(row["meeting_source"], 0):
+            sets += ["meeting_at=?", "meeting_text=?", "meeting_source=?", "meeting_quote=?", "meeting_event_uid=?"]
+            vals += [m.get("at"), m.get("text"), m.get("source"), m.get("quote"), m.get("uid")]
         if "hidden" in d:
             sets.append("hidden=?"); vals.append(1 if d["hidden"] else 0)
         if sets:
@@ -285,3 +294,24 @@ def purge(emails: list) -> int:
             n += c.execute("DELETE FROM bookings WHERE email=?", (e,)).rowcount
             c.execute("DELETE FROM briefs WHERE email=?", (e,))
     return n
+
+
+def get_setting(key: str) -> Optional[str]:
+    with _lock, _conn() as c:
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else None
+
+
+def set_setting(key: str, value: Optional[str]) -> None:
+    with _lock, _conn() as c:
+        if value is None:
+            c.execute("DELETE FROM settings WHERE key=?", (key,))
+        else:
+            c.execute("INSERT INTO settings(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (key, value))
+
+
+def all_bookings_raw() -> list:
+    with _lock, _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT email, bid, lead_name, company, booked_at, meeting_at, meeting_source, meeting_event_uid FROM bookings")]

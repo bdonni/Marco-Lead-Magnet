@@ -17,6 +17,7 @@ from weasyprint import HTML as WeasyHTML
 
 import store
 import dashboard
+import calendar_sync
 from identity import resolve_owner_profile
 from bookings import is_booked_event, is_marco_event, booking_from_payload, prospect_words, extract_meeting
 from research import company_research
@@ -35,6 +36,8 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 store.init()
+if os.environ.get("DISABLE_CALENDAR_SYNC") != "1":
+    calendar_sync.start_background_sync()
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 SLACK_BOT_TOKEN   = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -628,7 +631,13 @@ def post_booking_notice(req: BriefingRequest, booking: Optional[dict]) -> dict:
     lead = safe_str(req.lead_name, "")
     where = ((booking or {}).get("location") or req.location or "").strip()
     day, hours = dashboard._fmt_call((booking or {}).get("meeting_at"))
-    when = f"{day} · {hours}" if day else "Time not in the email thread yet"
+    src = (booking or {}).get("meeting_source")
+    if day and src == "calendar":
+        when = f"{day} · {hours}"
+    elif day:
+        when = f"{day} · {hours} _(not on Marco's calendar yet)_"
+    else:
+        when = "Not on Marco's calendar yet"
     link = dashboard.share_link(booking)
     who = " · ".join(x for x in (lead, extract_city_state(where)) if x)
     blocks = [
@@ -736,6 +745,10 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
                                   "title": req.title, "booked_at": store.now_iso() if booked_now else None,
                                   "names_soft": True})
     if not dry_run and post:
+        try:
+            calendar_sync.sync_once()  # the note should carry the time on Marco's calendar if it is there yet
+        except Exception:
+            pass
         booking = store.get_booking(store.bid_for(req.email)) if req.email else None
         slack_debug = post_booking_notice(req, booking)
         posted = True

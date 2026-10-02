@@ -12,6 +12,7 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["BRIEFS_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
+os.environ["DISABLE_CALENDAR_SYNC"] = "1"
 VIEW_KEY, INGEST_KEY = "view-key-for-tests", "ingest-key-for-tests"
 import hashlib
 os.environ["DASHBOARD_KEY_SHA256"] = hashlib.sha256(VIEW_KEY.encode()).hexdigest()
@@ -281,6 +282,100 @@ def test_briefview_turns_paragraphs_into_bullets_and_pdf_matches():
     assert "Walking in" in html and "<li>Lead with the 1954 history.</li>" in html and "The business" in html
     assert "<li>Established in 1954, it serves designers.</li>" in html and "11-50" in html and "1954 (" in html
     assert "Exit Motivation Hypothesis" not in html and "Advisor Note" not in html
+
+
+ICS = """BEGIN:VCALENDAR\r
+VERSION:2.0\r
+BEGIN:VEVENT\r
+DTSTART;TZID=America/Chicago:20261001T113000\r
+DTEND;TZID=America/Chicago:20261001T120000\r
+UID:calendly-kroll@google.com\r
+SUMMARY:Carrara Strategy Meeting between Marco Barone and Kevin Ebrahimi\r
+DESCRIPTION:Event Name: Carrara Strategy Meeting\\n\\nInvitee: Kevin Ebrahimi\r
+ATTENDEE;CN=Kevin Ebrahimi;PARTSTAT=ACCEPTED:mailto:kevin@krollfurniture.com\r
+ATTENDEE;CN=Marco Barone:mailto:marco@carrarastrategy.com\r
+END:VEVENT\r
+BEGIN:VEVENT\r
+DTSTART:20261009T140000Z\r
+DTEND:20261009T143000Z\r
+UID:imex-invite@google.com\r
+SUMMARY:Carrara Strategy <> Imex\r
+ATTENDEE;CN="Gladstein, Igol":mailto:igladst591@gmail.com\r
+ATTENDEE;CN=Adam Z:mailto:adam@imex\r
+ dopplers.com\r
+END:VEVENT\r
+BEGIN:VEVENT\r
+DTSTART:20261008T150000Z\r
+UID:imex-cancelled@google.com\r
+SUMMARY:Imex old slot\r
+STATUS:CANCELLED\r
+ATTENDEE:mailto:adam@imexdopplers.com\r
+END:VEVENT\r
+BEGIN:VEVENT\r
+DTSTART;VALUE=DATE:20261010\r
+UID:allday@google.com\r
+SUMMARY:Holiday\r
+END:VEVENT\r
+BEGIN:VEVENT\r
+DTSTART:20261012T160000Z\r
+UID:new-calendly@google.com\r
+SUMMARY:Carrara Strategy Meeting between Marco Barone and Pat New\r
+ATTENDEE:mailto:pat@newco.com\r
+ATTENDEE:mailto:marco@carrarastrategy.com\r
+END:VEVENT\r
+END:VCALENDAR\r
+"""
+
+
+def test_calendar_times_win_and_unmatched_events_listed():
+    import calendar_sync
+    from datetime import datetime, timezone
+    ev = calendar_sync.parse_ics(ICS)
+    assert {e["uid"] for e in ev} == {"calendly-kroll@google.com", "imex-invite@google.com", "imex-cancelled@google.com",
+                                      "new-calendly@google.com"}  # all-day dropped
+    imex_ev = next(e for e in ev if e["uid"] == "imex-invite@google.com")
+    assert "adam@imexdopplers.com" in imex_ev["attendees"]  # folded line rejoined
+    kroll = next(e for e in ev if e["uid"] == "calendly-kroll@google.com")
+    assert kroll["start"] == datetime(2026, 10, 1, 16, 30, tzinfo=timezone.utc)
+
+    store.upsert_booking({"email": "kevin@krollfurniture.com", "company": "Kroll Furniture", "lead_name": "Kevin Ebrahimi",
+                         "booked_at": "2026-09-28T15:00:00Z",
+                         "meeting": {"at": "2026-10-01T18:00:00Z", "source": "manual", "text": "guess"}})
+    store.upsert_booking({"email": "adam@imexdopplers.com", "company": "Imex", "lead_name": "Adam Zilberbaum",
+                         "booked_at": "2026-09-30T21:20:00Z"})
+
+    class Resp:
+        text = ICS
+        def raise_for_status(self):
+            pass
+    calendar_sync.requests.get = lambda url, timeout=None, headers=None: Resp()
+    real_now = calendar_sync.datetime
+
+    class FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+    calendar_sync.datetime = FakeDT
+    try:
+        out = calendar_sync.sync_once("https://calendar.google.com/calendar/ical/x/private-y/basic.ics")
+    finally:
+        calendar_sync.datetime = real_now
+    assert out["ok"] and out["matched"] >= 2, out
+    k = store.get_booking(store.bid_for("kevin@krollfurniture.com"))
+    assert k["meeting_source"] == "calendar" and k["meeting_at"] == "2026-10-01T16:30:00Z"  # calendar beats manual
+    i = store.get_booking(store.bid_for("adam@imexdopplers.com"))
+    assert i["meeting_at"] == "2026-10-09T14:00:00Z" and i["meeting_event_uid"] == "imex-invite@google.com"
+    # a thread guess can no longer move a calendar time
+    store.upsert_booking({"email": "adam@imexdopplers.com", "meeting": {"at": "2026-10-02T14:00:00Z", "source": "thread"}})
+    assert store.get_booking(store.bid_for("adam@imexdopplers.com"))["meeting_at"] == "2026-10-09T14:00:00Z"
+    unmatched = json.loads(store.get_setting("calendar_unmatched"))
+    assert [u["attendees"] for u in unmatched] == [["pat@newco.com"]]
+    c = TestClient(main.app)
+    c.cookies.set("mb_key", VIEW_KEY)
+    page = c.get(f"/briefs/{store.bid_for('kevin@krollfurniture.com')}").text
+    assert "On Marco&#x27;s calendar" in page or "On Marco's calendar" in page
+    api = c.get("/api/briefs/calendar", headers={"x-ingest-key": INGEST_KEY}).json()
+    assert api["unmatched"][0]["attendees"] == ["pat@newco.com"]
 
 
 if __name__ == "__main__":
