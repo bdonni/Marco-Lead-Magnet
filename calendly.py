@@ -46,8 +46,8 @@ COMPANY_Q = re.compile(r"\b(agency|company|business|firm|organi[sz]ation)\b(?!.*
 
 def booking_from_invitee(payload: dict) -> dict:
     ev = payload.get("scheduled_event") or {}
-    qa = [(str(q.get("question") or "").strip(), str(q.get("answer") or "").strip())
-          for q in payload.get("questions_and_answers") or [] if q.get("answer")]
+    qa = [(str(q.get("question") or "").strip(), "; ".join(x.strip() for x in str(q["answer"]).splitlines() if x.strip()))
+          for q in payload.get("questions_and_answers") or [] if q.get("answer")]  # multi-select answers come one per line
     company = next((a for q, a in qa if COMPANY_Q.search(q) and len(a) < 120), None)
     name = (payload.get("name") or f"{payload.get('first_name') or ''} {payload.get('last_name') or ''}").strip()
     return {

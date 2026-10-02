@@ -135,7 +135,8 @@ def test_calendly_booking_creates_call_and_cancel_hides_it():
             "email": "drew@trigonins.com", "name": "Drew Taylor", "first_name": "Drew", "created_at": "2026-10-02T15:00:00.000000Z",
             "uri": "https://api.calendly.com/scheduled_events/E1/invitees/I1", "rescheduled": False,
             "questions_and_answers": [{"question": "Agency name", "answer": "Trigon Insurance"},
-                                      {"question": "What would you like to discuss?", "answer": "Valuing my book"}],
+                                      {"question": "What would you like to discuss?", "answer": "Valuing my book"},
+                                      {"question": "Purpose?", "answer": "Selling my Agency\nRoutine check-up"}],
             "scheduled_event": {"uri": "https://api.calendly.com/scheduled_events/E1", "name": "Free Valuation Inquiry",
                                 "start_time": "2026-10-06T15:00:00.000000Z"}}, **(extra or {})}}).encode()
         t = str(int(time.time()))
@@ -149,7 +150,7 @@ def test_calendly_booking_creates_call_and_cancel_hides_it():
     assert b["meeting_at"] == "2026-10-06T15:00:00Z" and b["meeting_source"] == "calendar" and b["company"] == "Trigon Insurance"
     assert got[0]["qa"][1] == ("What would you like to discuss?", "Valuing my book")
     assert calendly.qa_text(got[0]["qa"]).startswith("Agency name: Trigon Insurance")
-    assert b["form_answers"].endswith("What would you like to discuss?: Valuing my book")
+    assert b["form_answers"].endswith("Valuing my book\nPurpose?: Selling my Agency; Routine check-up")
     page = c.get(f"/b/{b['share_token']}").text
     assert "Booking form answers" in page and "Valuing my book" in page
     other = {"uri": "https://api.calendly.com/scheduled_events/E0/invitees/I0",
@@ -159,6 +160,14 @@ def test_calendly_booking_creates_call_and_cancel_hides_it():
     assert store.get_booking(store.bid_for("drew@trigonins.com"))["hidden"] == 0
     assert send("invitee.canceled", {"uri": "https://api.calendly.com/scheduled_events/E1/invitees/I2"}).json().get("hidden")
     assert store.get_booking(store.bid_for("drew@trigonins.com"))["hidden"] == 1
+
+
+def test_home_timezone_leads():
+    import dashboard
+    store.set_setting("tenant_config", json.dumps({"firm": "X", "home_tz": "ET"}))
+    assert dashboard._fmt_call("2026-10-01T18:00:00Z") == ("Thu 1 Oct", "2:00 PM ET · 1:00 PM CT")
+    store.set_setting("tenant_config", json.dumps({"firm": "X"}))
+    assert dashboard._fmt_call("2026-10-01T18:00:00Z") == ("Thu 1 Oct", "1:00 PM CT · 2:00 PM ET")
 
 
 if __name__ == "__main__":

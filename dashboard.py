@@ -79,23 +79,30 @@ def _dt(iso: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _zones() -> tuple:
+    """(home label, home zone, other label, other zone). The caller's own zone leads; CT unless the client says ET."""
+    home = "ET" if tenant.get("home_tz") == "ET" else "CT"
+    return (home, ET, "CT", CT) if home == "ET" else (home, CT, "ET", ET)
+
+
 def _fmt_call(iso: Optional[str]) -> tuple:
     d = _dt(iso)
     if not d:
         return ("", "")
-    ct, et = d.astimezone(CT), d.astimezone(ET)
-    day = ct.strftime("%a %-d %b")
-    return (day, f"{ct.strftime('%-I:%M %p')} CT · {et.strftime('%-I:%M %p')} ET")
+    hl, hz, ol, oz = _zones()
+    h, o = d.astimezone(hz), d.astimezone(oz)
+    return (h.strftime("%a %-d %b"), f"{h.strftime('%-I:%M %p')} {hl} · {o.strftime('%-I:%M %p')} {ol}")
 
 
 def _fmt_day(iso: Optional[str]) -> str:
     d = _dt(iso)
-    return d.astimezone(CT).strftime("%-d %b %Y") if d else ""
+    return d.astimezone(_zones()[1]).strftime("%-d %b %Y") if d else ""
 
 
 def _fmt_stamp(iso: Optional[str]) -> str:
     d = _dt(iso)
-    return d.astimezone(CT).strftime("%a %-d %b, %-I:%M %p CT") if d else ""
+    hl, hz = _zones()[:2]
+    return d.astimezone(hz).strftime(f"%a %-d %b, %-I:%M %p {hl}") if d else ""
 
 
 def _rel(iso: Optional[str]) -> str:
@@ -105,7 +112,8 @@ def _rel(iso: Optional[str]) -> str:
         return ""
     now = datetime.now(timezone.utc)
     secs = (d - now).total_seconds()
-    days = (d.astimezone(CT).date() - now.astimezone(CT).date()).days
+    hz = _zones()[1]
+    days = (d.astimezone(hz).date() - now.astimezone(hz).date()).days
     if -5400 < secs < 0:
         return "now"
     if secs >= 0:
@@ -246,6 +254,8 @@ td.col-thread{display:none}.search{max-width:none;margin-left:0}}
 def _calendar_status() -> str:
     ok = _dt(store.get_setting("calendar_last_ok"))
     if not store.get_setting("calendar_ics_url"):
+        if store.get_setting("calendly_signing_key"):
+            return f"call times from {tenant.calendar_owner()} Calendly"
         return f"call times not linked to {tenant.calendar_owner()} calendar yet"
     if not ok:
         return f"connecting to {tenant.calendar_owner()} calendar"
@@ -321,7 +331,7 @@ def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcom
         search = " ".join(str(b.get(k) or "") for k in ("company", "lead_name", "email", "website", "location")).lower()
         trs.append(f"""<tr data-s="{e(search)}" onclick="location.href='/briefs/{e(b['bid'])}'">
 <td class="when">{when}</td>
-<td><div class="co"><a href="/briefs/{e(b['bid'])}">{e(b.get('company') or '(company unknown)')}</a></div><small class="muted">{e(site)}</small></td>
+<td><div class="co"><a href="/briefs/{e(b['bid'])}">{e(b.get('company') or b.get('lead_name') or '(company unknown)')}</a></div><small class="muted">{e(site)}</small></td>
 <td>{e(b.get('lead_name') or b.get('first_name') or '')}<br><small class="muted">{e(briefview.clean_place(b.get('location')) or '')}</small></td>
 <td>{e(_fmt_day(b.get('booked_at')))}</td>
 <td>{brief}</td>
@@ -378,12 +388,12 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     else:
         call = f"<div class='big'>Time not set</div><small class='muted'>Not on {e(tenant.calendar_owner())} calendar yet. It appears here as soon as it is.</small>"
     d0 = _dt(b.get("meeting_at"))
-    d_ct = d0.astimezone(CT) if d0 else None
+    d_ct = d0.astimezone(_zones()[1]) if d0 else None
     bid = b["bid"]
     form = "" if not editable else f"""<form method="post" action="/briefs/{e(bid)}/meeting">
 <input type="date" name="date" value="{d_ct.strftime('%Y-%m-%d') if d_ct else ''}" required>
 <input type="time" name="time" value="{d_ct.strftime('%H:%M') if d_ct else ''}" required>
-<select name="tz">{''.join(f"<option{' selected' if k == 'CT' else ''}>{k}</option>" for k in TZ_CHOICES)}</select>
+<select name="tz">{''.join(f"<option{' selected' if k == _zones()[0] else ''}>{k}</option>" for k in TZ_CHOICES)}</select>
 <button class="btn" type="submit">Save time</button></form>"""
 
     v = briefview.view(req, a, b) if br else {"facts": briefview.facts(req, b)}
@@ -438,13 +448,13 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
 
     back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else "<span></span>"
     body = f"""<div class="brandbar">{back_link}{_logo_tile()}</div>
-<div class="card hero"><div><h1>{e(b.get('company') or '(company unknown)')}</h1>
+<div class="card hero"><div><h1>{e(b.get('company') or b.get('lead_name') or '(company unknown)')}</h1>
 <div class="sub">{e(b.get('lead_name') or '')}{(' · ' + e(b.get('title'))) if b.get('title') else ''} · booked {e(_fmt_day(b.get('booked_at')))}</div>
 </div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
 <div class="card facts-card"><div class="facts">{facts_html}</div></div>
 <div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
-    return page(f"{b.get('company') or 'Booking'} · Pre-Call Brief", body)
+    return page(f"{b.get('company') or b.get('lead_name') or 'Booking'} · Pre-Call Brief", body)
 
 
 @router.get("/briefs/{bid}", response_class=HTMLResponse)

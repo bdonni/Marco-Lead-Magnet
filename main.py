@@ -170,6 +170,7 @@ Rules:
 - If the owner profile is not verified, do not guess tenure or age; put what to confirm in confirm_on_call instead.
 - Use only what is above. Never invent facts, numbers or quotes. Leave a list empty rather than pad it.
 - Every bullet is one short sentence, under 22 words. No em dashes. Plain words.
+- Refer to people by first name or as "they". Never guess anyone's gender from their name.
 
 Return ONLY valid JSON, no preamble, no markdown:
 {{
