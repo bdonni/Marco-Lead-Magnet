@@ -291,6 +291,15 @@ def set_campaigns(rows: list) -> int:
     return len(rows)
 
 
+def campaign_name(cid) -> Optional[str]:
+    try:
+        with _lock, _conn() as c:
+            r = c.execute("SELECT name FROM campaigns WHERE id=?", (int(cid),)).fetchone()
+        return r["name"] if r else None
+    except (TypeError, ValueError):
+        return None
+
+
 def campaign_ids() -> set:
     with _lock, _conn() as c:
         return {r["id"] for r in c.execute("SELECT id FROM campaigns")}

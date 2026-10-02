@@ -132,6 +132,8 @@ def years_operating(founded_year) -> Optional[int]:
 def campaign_note(campaign_name: Optional[str]) -> Optional[str]:
     """What this client told us about the campaign a call came from (a buy-side mandate's buyer and criteria, or
     general sell-side). Tenant config campaign_notes: [{"match": regex on campaign name, "note": text}], first match."""
+    if not (campaign_name or "").strip():
+        return None  # unknown campaign: no note beats the wrong one
     for rule in tenant.get("campaign_notes") or []:
         try:
             if re.search(rule.get("match") or "(?!)", campaign_name or "", re.I):
@@ -726,7 +728,8 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
         thread = b.get("thread") or []
     if extra_words is None:
         extra_words = b.get("form_answers")
-    cnote = campaign_note(b.get("campaign_name"))
+    # the campaign the lead was sent from, not a follow-up subsequence it was moved into (e.g. "POS REPLY")
+    cnote = campaign_note(store.campaign_name(b.get("campaign_id")) or b.get("campaign_name"))
     if not req.business_summary and req.website:
         overview = overview_from_site(claude_client, OVERVIEW_MODEL, req.company_name, domain_of(req.website))
         if overview:

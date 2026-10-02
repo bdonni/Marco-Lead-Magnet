@@ -254,6 +254,9 @@ def test_campaign_note_reaches_the_brief_prompt():
         {"match": ".*", "note": "General sell-side."}]}))
     assert main.campaign_note("Vant - BuySide Food CPG (Trovaya) v1") == "Buy-side for Chirag: EBITDA $1M+."
     assert main.campaign_note("Vant - Buyer Interest 3-Step (V1 winner)") == "General sell-side."
+    assert main.campaign_note(None) is None and main.campaign_note("") is None
+    store.set_campaigns([{"id": 3877092, "name": "Vant - BuySide Food CPG (Trovaya) v1"}])
+    assert store.campaign_name(3877092) == "Vant - BuySide Food CPG (Trovaya) v1" and store.campaign_name(None) is None
     seen = {}
 
     class Msg:
