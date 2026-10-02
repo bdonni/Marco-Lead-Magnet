@@ -694,9 +694,11 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
         store.save_brief(req.email, req.company_name, req.lead_name, source + ("-dry" if dry_run else ""),
                          owner_status, req.model_dump(), assessment, posted)
         if req.email:
+            # Smartlead's lead record owns the booking's names; a brief only fills blanks.
             store.upsert_booking({"email": req.email, "lead_name": req.lead_name, "first_name": req.first_name,
                                   "company": req.company_name, "website": req.website, "location": req.location,
-                                  "title": req.title, "booked_at": store.now_iso() if booked_now else None})
+                                  "title": req.title, "booked_at": store.now_iso() if booked_now else None,
+                                  "names_soft": True})
     if dry_run:
         return {"status": "dry_run", "company": req.company_name, "lead_name": req.lead_name,
                 "owner_status": owner_status, "owner_reason": why, "owner_profile": owner_text,

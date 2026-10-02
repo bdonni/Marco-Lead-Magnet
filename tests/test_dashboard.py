@@ -158,6 +158,32 @@ def test_booked_at_rules():
     assert store.get_booking(store.bid_for("x@y.com"))["booked_at"] == "2026-09-30T10:00:00Z"
 
 
+def test_meeting_extractor_guards():
+    from bookings import extract_meeting
+
+    class Fake:
+        def __init__(self, out):
+            self.out = out
+            self.messages = self
+
+        def create(self, **kw):
+            self.prompt = kw["messages"][0]["content"]
+            return types.SimpleNamespace(content=[types.SimpleNamespace(text=json.dumps(self.out))])
+
+    thread = [{"type": "SENT", "time": "2026-09-29T19:59:11Z", "text": "thursday at 1pm or friday at 10am pacific?"},
+              {"type": "REPLY", "time": "2026-09-29T20:03:36Z", "text": "I can do Friday."}]
+    # Boulder Dog Food: the model said Friday but resolved a Saturday -> rejected
+    bad = Fake({"agreed": True, "local_datetime": "2026-10-03T10:00", "timezone": "America/Los_Angeles",
+                "stated_as": "Friday at 10am pacific", "quote": "I can do Friday."})
+    assert extract_meeting(bad, "m", thread, "Colorado") is None
+    assert "Fri 2026-10-02" in bad.prompt and "(Tuesday)" in bad.prompt
+    good = Fake({"agreed": True, "local_datetime": "2026-10-02T10:00", "timezone": "America/Los_Angeles",
+                 "stated_as": "Friday at 10am pacific", "quote": "I can do Friday."})
+    m = extract_meeting(good, "m", thread, "Colorado")
+    assert m["at"] == "2026-10-02T17:00:00Z" and m["source"] == "thread"
+    assert extract_meeting(Fake({"agreed": False}), "m", thread, "Colorado") is None
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

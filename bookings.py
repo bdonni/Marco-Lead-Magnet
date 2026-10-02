@@ -181,15 +181,27 @@ def extract_meeting(client, model: str, thread: list, state: Optional[str]) -> O
     lines = []
     for m in thread[-8:]:
         who = "PROSPECT" if m.get("type") == "REPLY" else "US"
-        lines.append(f"--- {who} at {m.get('time')} UTC\n{m['text'][:1500]}")
+        try:
+            wd = datetime.fromisoformat(str(m.get("time")).replace("Z", "+00:00")).strftime("%A")
+        except ValueError:
+            wd = ""
+        lines.append(f"--- {who} at {m.get('time')} UTC ({wd})\n{m['text'][:1500]}")
     tz_hint = state_tz(state) or "unknown"
+    try:
+        start = datetime.fromisoformat(str(thread[max(0, len(thread) - 8)].get("time")).replace("Z", "+00:00")).date()
+    except ValueError:
+        start = datetime.now(timezone.utc).date()
+    calendar = ", ".join((start + timedelta(days=i)).strftime("%a %Y-%m-%d") for i in range(28))
     prompt = f"""Below is the end of an email thread between us (an M&A advisor's team) and a business owner who booked a call.
 Message times are UTC. The prospect's state timezone is {tz_hint}.
 
 {chr(10).join(lines)}
 
+Calendar for working out dates: {calendar}
+
 Has a specific date and time for the call been agreed (proposed by one side and accepted, or a calendar booking confirmed)?
-Resolve weekday names against the date of the message they appear in. Return ONLY JSON:
+A list of options is not agreement; use the option the other side accepted. Resolve weekday names with the calendar
+above, counting forward from the date of the message they appear in. Return ONLY JSON:
 {{"agreed": true or false,
   "local_datetime": "YYYY-MM-DDTHH:MM" (24h clock, in the timezone the time was stated in),
   "timezone": IANA name the time was stated in, e.g. "America/New_York" for ET, "America/Chicago" for CT; use the prospect's state timezone if none is stated,
@@ -211,6 +223,11 @@ If no specific time was agreed, return {{"agreed": false}}."""
         local = datetime.fromisoformat(str(d["local_datetime"])[:16])
         at = local.replace(tzinfo=ZoneInfo(tzname)).astimezone(timezone.utc)
     except Exception:
+        return None
+    # a stated weekday must match the date we resolved
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    said = next((i for i, dname in enumerate(days) if dname in (d.get("stated_as") or "").lower()), None)
+    if said is not None and local.weekday() != said:
         return None
     last = max((m.get("time") or "" for m in thread), default="")
     try:
