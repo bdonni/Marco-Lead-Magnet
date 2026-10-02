@@ -213,9 +213,16 @@ def test_booked_brief_posts_short_notice_with_link():
     main.requests.post = lambda url, json=None, timeout=None, **kw: (sent.append((url, json)), R())[1]
     main.SLACK_WEBHOOK_URL = "https://hooks.slack.test/x"
     main.overview_from_site = lambda *a, **k: "Makes handheld Dopplers."
+    main.company_research = lambda *a, **k: {"founded_year": "1976", "hq": "Kingsville, MD", "employees": "11-50 (LinkedIn)",
+                                             "ownership": "acquired from Natus Medical in 2023",
+                                             "recent_developments": ["Jan 2023: acquired from Natus Medical"]}
     main.resolve_owner_profile = lambda client, req: ("• Adam is President.", "verified_research", "test")
-    main.generate_assessment = lambda req, status, words=None: {"motivation_hypothesis": "m", "key_strengths": ["s"],
-                                                                 "marco_briefing_note": "n"}
+    main.generate_assessment = lambda req, status, words=None, facts=None: {
+        "walking_in": ["Igol, Adam's partner, runs the emails; ask him to join."],
+        "they_said": ["Igol (partner): we certainly do not need to sell"],
+        "confirm_on_call": ["Who owns what share of Imex?"], "why_now": ["Testing the waters on value."],
+        "key_strengths": ["Fifty-year brand"], "business_points": ["Makes handheld Dopplers."],
+        "owner_points": ["Adam is President since 2023."], "motivation_hypothesis": "m", "marco_briefing_note": "n"}
 
     class _H:
         def __init__(self, string=""):
@@ -242,11 +249,38 @@ def test_booked_brief_posts_short_notice_with_link():
     c = TestClient(main.app)
     page = c.get(f"/b/{b['share_token']}").text
     assert "Notice Co" in page and "Makes handheld Dopplers." in page and "Save time" not in page and "All booked calls" not in page
+    for want in ("Walking in", "In their words", "Confirm on the call", "Why they might talk now", "The business",
+                 "The owner", "Deal strengths", "Recent developments", "11-50 (LinkedIn)", "Kingsville, MD",
+                 "1976 (", "acquired from Natus Medical in 2023", "<ol><li>Who owns what share of Imex?</li></ol>"):
+        assert want in page, want
     calls = []
     main.dashboard._hooks["render_pdf"] = lambda *a: (calls.append(1), b"%PDF-1.4 rendered")[1]
     pdf = c.get(f"/b/{b['share_token']}/pdf")
     assert pdf.status_code == 200 and pdf.content == b"%PDF-1.4 real" and calls == []  # pre-warmed at build time
     assert c.get("/b/not-a-token").status_code == 401
+
+
+def test_briefview_turns_paragraphs_into_bullets_and_pdf_matches():
+    import briefview
+    legacy_owner = ("Profile of Brian Packard\n\u2022 Role: Brian is President and CEO since 1996.\n"
+                    "\u2022 Age Range: likely 50-60 years.")
+    assert briefview.points(legacy_owner) == ["Role: Brian is President and CEO since 1996.", "Age Range: likely 50-60 years."]
+    para = ("Kroll Furniture specializes in custom furniture for hospitality. Established in 1954, it serves designers. "
+            "Ok. While detailed figures are not available, the company is mature.")
+    assert briefview.points(para) == ["Kroll Furniture specializes in custom furniture for hospitality.",
+                                      "Established in 1954, it serves designers.",
+                                      "While detailed figures are not available, the company is mature."]
+    v = briefview.view({"business_summary": para, "recent_news": "No significant news found."},
+                       {"motivation_hypothesis": "He took over in 2023. Two years in is a natural window.",
+                        "key_strengths": ["70-year history"]})
+    assert v["why_now"] == ["He took over in 2023.", "Two years in is a natural window."] and v["recent"] == []
+    req = main.BriefingRequest(company_name="Kroll Furniture", lead_name="Kevin Ebrahimi", founded_year="1954",
+                               location="San Francisco, CA", business_summary=para, employees="11-50")
+    html = main.build_pdf_html(req, {"walking_in": ["Lead with the 1954 history."], "key_strengths": ["70-year history"]},
+                               "verified_upstream")
+    assert "Walking in" in html and "<li>Lead with the 1954 history.</li>" in html and "The business" in html
+    assert "<li>Established in 1954, it serves designers.</li>" in html and "11-50" in html and "1954 (" in html
+    assert "Exit Motivation Hypothesis" not in html and "Advisor Note" not in html
 
 
 if __name__ == "__main__":

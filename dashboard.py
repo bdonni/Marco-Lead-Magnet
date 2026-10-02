@@ -16,6 +16,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 import store
+import briefview
 from bookings import normalize_thread
 
 try:
@@ -193,6 +194,9 @@ tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{backgrou
 .back{display:inline-block;margin-bottom:14px;font-size:14px}
 .hero{padding:22px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px 18px;margin-top:14px}
+.fact span{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.fact b{font-weight:600;font-size:14px;word-break:break-word}
 .chip{background:var(--chip);border-radius:6px;padding:3px 9px;font-size:13px;color:var(--ink)}
 .calltime{min-width:260px;background:var(--soft);border-radius:10px;padding:14px 16px}
 .calltime .big{font-size:20px;font-weight:700;line-height:1.25}
@@ -205,7 +209,8 @@ background:var(--accent);color:var(--accent-ink);cursor:pointer}
 .cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:18px;margin-top:18px}
 .sec{padding:18px 20px}.sec+.sec{border-top:1px solid var(--line)}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 8px}
-.sec p{margin:0 0 10px}.sec ul{margin:0;padding-left:20px}.sec li{margin-bottom:6px}
+.sec p{margin:0 0 10px}.sec ul,.sec ol{margin:0;padding-left:20px}.sec li{margin-bottom:7px;line-height:1.5}
+.sec ul.quotes{list-style:none;padding-left:0}.sec ul.quotes li{border-left:3px solid var(--accent);padding:2px 0 2px 12px;font-style:italic}
 .briefhead{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--line)}
 .thread{max-height:none}
 .msg{padding:14px 18px;border-bottom:1px solid var(--line)}.msg:last-child{border-bottom:0}
@@ -329,33 +334,29 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
 <select name="tz">{''.join(f"<option{' selected' if k == 'CT' else ''}>{k}</option>" for k in TZ_CHOICES)}</select>
 <button class="btn" type="submit">Save time</button></form>"""
 
-    chips = []
-    for label, val in (("", b.get("location") or req.get("location")), ("Founded ", req.get("founded_year")),
-                       ("", b.get("email"))):
-        if val:
-            chips.append(f"<span class='chip'>{e(label)}{e(val)}</span>")
+    v = briefview.view(req, a, b) if br else {"facts": briefview.facts(req, b)}
     site = b.get("website") or req.get("website")
-    if site:
-        url = site if site.startswith("http") else "https://" + site
-        chips.append(f"<a class='chip' href='{e(url)}' target='_blank' rel='noopener'>{e(site.replace('https://', '').replace('http://', '').strip('/'))} ↗</a>")
+    facts_html = ""
+    for k, val in v["facts"]:
+        if k == "Website" and site:
+            url = site if site.startswith("http") else "https://" + site
+            val_html = f"<a href='{e(url)}' target='_blank' rel='noopener'>{e(val)} ↗</a>"
+        else:
+            val_html = e(val)
+        facts_html += f"<div class='fact'><span>{e(k)}</span><b>{val_html}</b></div>"
 
     if br:
         label, cls = OWNER_BADGE.get(br.get("owner_status") or "", ("Owner profile", "neutral"))
-        strengths = a.get("key_strengths") or []
         secs = []
-        if a.get("marco_briefing_note"):
-            secs.append(f"<div class='sec'><h2>Walking in</h2>{_para(a['marco_briefing_note'])}</div>")
-        if req.get("business_summary"):
-            secs.append(f"<div class='sec'><h2>Business overview</h2>{_para(req['business_summary'])}</div>")
-        if req.get("owner_summary"):
-            secs.append(f"<div class='sec'><h2>Owner profile <span class='badge {cls}' style='margin-left:6px'>{e(label)}</span></h2>{_para(req['owner_summary'])}</div>")
-        if a.get("motivation_hypothesis"):
-            secs.append(f"<div class='sec'><h2>Why they might talk now</h2>{_para(a['motivation_hypothesis'])}</div>")
-        if strengths:
-            secs.append("<div class='sec'><h2>Deal strengths</h2><ul>" + "".join(f"<li>{e(s)}</li>" for s in strengths) + "</ul></div>")
-        news = req.get("recent_news")
-        if news and news.strip().rstrip(".").lower() not in ("no significant news found", "no news found", "none", "n/a"):
-            secs.append(f"<div class='sec'><h2>Recent developments</h2>{_para(news)}</div>")
+        for key, title in briefview.SECTIONS:
+            items = v.get(key) or []
+            if not items:
+                continue
+            badge = f" <span class='badge {cls}' style='margin-left:6px'>{e(label)}</span>" if key == "owner" else ""
+            tag = "ol" if key == "confirm" else "ul"
+            klass = " class='quotes'" if key == "they_said" else ""
+            lis = "".join(f"<li>{e(x)}</li>" for x in items)
+            secs.append(f"<div class='sec'><h2>{e(title)}{badge}</h2><{tag}{klass}>{lis}</{tag}></div>")
         pdf = (f"<a class='btn' href='{e(pdf_url)}'>Download PDF</a>" if _hooks["render_pdf"] else "")
         if editable:
             pdf = (f"<span style='display:flex;gap:6px'><button class='btn ghost' type='button' "
@@ -381,7 +382,7 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     body = f"""{back_link}
 <div class="card hero"><div><h1>{e(b.get('company') or '(company unknown)')}</h1>
 <div class="sub">{e(b.get('lead_name') or '')}{(' · ' + e(b.get('title'))) if b.get('title') else ''} · booked {e(_fmt_day(b.get('booked_at')))}</div>
-<div class="chips">{''.join(chips)}</div></div>
+<div class="facts">{facts_html}</div></div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
 <div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
     return page(f"{b.get('company') or 'Booking'} · Pre-Call Brief", body)

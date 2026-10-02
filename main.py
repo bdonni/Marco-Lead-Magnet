@@ -19,11 +19,14 @@ import store
 import dashboard
 from identity import resolve_owner_profile
 from bookings import is_booked_event, is_marco_event, booking_from_payload, prospect_words, extract_meeting
+from research import company_research
+import briefview
 from intake import (flatten, normalize, seen_recently, brief_key, overview_from_site, domain_of,
                     smartlead_lead, apply_lead_record, CLAY_WEBHOOK_RE, forward_to_clay)
 
 BRIEF_DEDUPE_SECONDS = int(os.environ.get("BRIEF_DEDUPE_SECONDS", "10800"))
 OVERVIEW_MODEL = os.environ.get("OVERVIEW_MODEL", "claude-sonnet-4-6")
+RESEARCH_MODEL = os.environ.get("RESEARCH_MODEL", "claude-sonnet-4-6")
 SMARTLEAD_API_KEY = os.environ.get("SMARTLEAD_API_KEY", "")
 MEETING_MODEL = os.environ.get("MEETING_MODEL", "claude-haiku-4-5")
 
@@ -58,6 +61,9 @@ class BriefingRequest(BaseModel):
     recent_news:      Optional[str] = None
     owner_summary:    Optional[str] = None
     title:            Optional[str] = None
+    employees:        Optional[str] = None
+    ownership:        Optional[str] = None
+    revenue:          Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -116,7 +122,7 @@ def years_operating(founded_year) -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upstream",
-                        thread_text: Optional[str] = None) -> dict:
+                        thread_text: Optional[str] = None, research_facts: Optional[list] = None) -> dict:
     parts = []
     if req.business_summary:
         parts.append(f"BUSINESS OVERVIEW:\n{req.business_summary}")
@@ -132,47 +138,70 @@ def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upst
         parts.append(f"YEARS IN BUSINESS: {yrs}")
     if req.location:
         parts.append(f"LOCATION: {extract_city_state(req.location)}")
+    for label, val in (("SIZE", req.employees), ("OWNERSHIP", req.ownership), ("REVENUE", req.revenue)):
+        if val:
+            parts.append(f"{label}: {val}")
+    if research_facts:
+        parts.append("OTHER FACTS FROM RESEARCH:\n" + "\n".join(f"- {f}" for f in research_facts))
     if thread_text:
         parts.append(f"WHAT THEY HAVE WRITTEN TO US BY EMAIL (their own words, oldest first):\n{thread_text}")
 
     context = "\n\n".join(parts) or "Limited information available."
+    who, co = req.lead_name or "the owner", req.company_name or "this company"
 
-    prompt = f"""You are preparing a pre-call briefing for Marco, a sell-side M&A advisor at Carrara Strategy Group. His buyer is a New England-based firm with $100M+ acquisition capacity targeting US manufacturers and distributors with 10-150 employees.
+    prompt = f"""You are preparing a pre-call brief for Marco, a sell-side M&A advisor at Carrara Strategy Group. Marco reads it minutes before the call, often on his phone, so every point must be short and scannable.
 
-Marco is about to speak with {req.lead_name or "the owner"} at {req.company_name or "this company"}. Here is everything we know:
+Marco is about to speak with {who} at {co}. Here is everything we know:
 
 {context}
 
-Rules: never say or imply that {req.lead_name or "the contact"} works somewhere else, is someone else, or is not connected to {req.company_name or "the company"}. If the owner profile is not verified, do not guess tenure or age; tell Marco what to confirm early in the call instead. When their emails say what they want or what worries them (timeline, price, financing, a partner joining), build the briefing note around that. Never invent anything they did not write.
+Rules:
+- Never say or imply that {req.lead_name or "the contact"} works somewhere else, is someone else, or is not connected to {co}.
+- If the owner profile is not verified, do not guess tenure or age; put what to confirm in confirm_on_call instead.
+- Use only what is above. Never invent facts, numbers or quotes. Leave a list empty rather than pad it.
+- Every bullet is one short sentence, under 22 words. No em dashes. Plain words.
 
-Generate a concise M&A briefing. Return ONLY valid JSON with exactly these fields, no preamble, no markdown, no em dashes anywhere in your output:
-
+Return ONLY valid JSON, no preamble, no markdown:
 {{
-  "motivation_hypothesis": "2-3 sentences on why this owner might be open right now. Ground this in their tenure, estimated age, and any business signals. No em dashes.",
-  "key_strengths": [
-    "Strength specific to this business relevant to an acquirer",
-    "Second strength",
-    "Third strength"
-  ],
-  "marco_briefing_note": "One sharp paragraph of what Marco should know walking in. Tone advice, rapport angles, context. Direct and specific. No em dashes."
+  "walking_in": ["3 to 5 bullets: who will be on the call, their stance, what to lead with, what to avoid"],
+  "they_said": ["1 to 3 short quotes copied word for word from their emails, each with who said it, e.g. 'Igol (partner): we certainly do not need to sell'; empty list if there are no emails"],
+  "confirm_on_call": ["3 or 4 short questions Marco should get answered: ownership and decision makers, size (revenue or EBITDA, headcount), timeline, anything unverified"],
+  "why_now": ["2 or 3 bullets on why this owner might be open now, grounded in tenure, age, events or what they wrote"],
+  "key_strengths": ["3 bullets on what makes the business attractive to an acquirer"],
+  "business_points": ["3 to 5 bullets: what they make or do, who buys it, size signals, ownership"],
+  "owner_points": ["2 to 4 bullets on the owner, only from the owner profile above; empty list if there is no profile"]
 }}"""
 
     msg = claude_client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=800,
+        max_tokens=1500,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = msg.content[0].text.strip()
     raw = re.sub(r"^```json\s*", "", raw)
     raw = re.sub(r"\s*```$",     "", raw)
     try:
-        return json.loads(raw)
+        a = json.loads(raw)
     except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.S)
+        try:
+            a = json.loads(m.group(0)) if m else {}
+        except json.JSONDecodeError:
+            a = {}
+    if not a:
         return {
-            "motivation_hypothesis": "Unable to determine motivation from available information.",
-            "key_strengths": ["Established private business", "US-based operation", "Potential strategic fit"],
-            "marco_briefing_note": "Limited data available. Lead with curiosity and rapport.",
+            "walking_in": ["Limited data available. Lead with curiosity and rapport."],
+            "confirm_on_call": ["Who owns the business and who decides on a sale?", "Rough revenue and headcount?",
+                                "Timeline: is this a now conversation or a later one?"],
+            "key_strengths": [], "motivation_hypothesis": "", "marco_briefing_note": "Limited data available.",
         }
+    clean = lambda x: str(x).replace("\u2014", " - ").replace("\u2013", " - ").strip()
+    for k in ("walking_in", "they_said", "confirm_on_call", "why_now", "key_strengths", "business_points", "owner_points"):
+        a[k] = [clean(x) for x in (a.get(k) or []) if str(x).strip()]
+    # the old paragraph fields, kept for anything that still reads them
+    a["motivation_hypothesis"] = " ".join(a["why_now"])
+    a["marco_briefing_note"] = " ".join(a["walking_in"])
+    return a
 
 
 # ---------------------------------------------------------------------------
@@ -196,54 +225,31 @@ def build_pdf_html(req: BriefingRequest, assessment: dict, owner_status: str = "
     yrs        = years_operating(req.founded_year)
     founded_lbl = f"{founded} ({yrs} yrs)" if founded and yrs else founded
 
-    biz_text   = clean_text(req.business_summary  or "")
-    owner_text = clean_text(req.owner_summary      or "")
-    news_text  = clean_text(req.recent_news        or "")
+    v = briefview.view(req.model_dump(), assessment)
+    esc = lambda t: (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                     .replace("\u2014", " - ").replace("\u2013", " - "))
 
-    # Strip em dashes from assessment output too
-    def clean_assessment_str(s):
-        return s.replace("\u2014", " - ").replace("\u2013", " - ").replace("--", " - ") if s else s
-
-    motivation = clean_assessment_str(assessment.get("motivation_hypothesis", ""))
-    note       = clean_assessment_str(assessment.get("marco_briefing_note", ""))
-    strengths  = [clean_assessment_str(s) for s in assessment.get("key_strengths", [])]
-
-    meta = []
-    if lead:        meta.append(("Contact",  lead))
-    if city_state:  meta.append(("Location", city_state))
-    if founded_lbl: meta.append(("Founded",  founded_lbl))
-    if website:     meta.append(("Website",  website))
-    if req.email:   meta.append(("Email",    req.email))
-
+    meta = [(k, val) for k, val in v["facts"] if k != "Email"]
     meta_html = "".join(
         f'''<div class="meta-item">
-          <div class="meta-lbl">{k}</div>
-          <div class="meta-val">{v}</div>
-        </div>''' for k, v in meta
+          <div class="meta-lbl">{esc(k)}</div>
+          <div class="meta-val">{esc(val)}</div>
+        </div>''' for k, val in meta
     )
 
-    strengths_html = "".join(
-        f'<div class="bullet-row"><span class="icon-g">&#10003;</span><span>{s}</span></div>'
-        for s in strengths
-    )
-
-    biz_section = f'''
-      <div class="section">
-        <div class="section-title">Business Overview</div>
-        <p>{biz_text}</p>
-      </div>''' if biz_text else ""
-
-    owner_section = f'''
-      <div class="section">
-        <div class="section-title">Owner Profile</div>
-        <p>{owner_text}</p>{f'<p><em>{OWNER_STATUS_NOTE.get(owner_status, "")}</em></p>' if OWNER_STATUS_NOTE.get(owner_status) else ""}
-      </div>''' if owner_text else ""
-
-    news_section = f'''
-      <div class="section">
-        <div class="section-title">Recent Developments</div>
-        <p>{news_text}</p>
-      </div>''' if not no_news(req.recent_news) else ""
+    blocks = []
+    for key, title in briefview.SECTIONS:
+        items = v.get(key) or []
+        if not items:
+            continue
+        cls = "pts quote" if key == "they_said" else "pts"
+        lis = "".join(f"<li>{esc(x)}</li>" for x in items)
+        extra = ""
+        if key == "owner" and OWNER_STATUS_NOTE.get(owner_status):
+            extra = f'<p class="pnote"><em>{esc(OWNER_STATUS_NOTE[owner_status])}</em></p>'
+        blocks.append(f'''<div class="section"><div class="section-title">{esc(title)}</div>
+<ul class="{cls}">{lis}</ul>{extra}</div>''')
+    sections_html = "\n".join(blocks)
 
     return f'''<!DOCTYPE html>
 <html>
@@ -457,6 +463,10 @@ def build_pdf_html(req: BriefingRequest, assessment: dict, owner_status: str = "
     font-size: 7.5px;
     color: #3d5a80;
   }}
+  .pts {{ margin: 0; padding-left: 14px; }}
+  .pts li {{ font-size: 10px; color: #b8cce4; line-height: 1.6; margin-bottom: 3px; }}
+  .pts.quote li {{ list-style: none; margin-left: -14px; padding-left: 8px; border-left: 2px solid #4d7cf5; font-style: italic; }}
+  .pnote {{ margin-top: 4px; }}
 </style>
 </head>
 <body>
@@ -479,28 +489,7 @@ def build_pdf_html(req: BriefingRequest, assessment: dict, owner_status: str = "
 
 <div class="body">
 
-  {biz_section}
-  {owner_section}
-  {news_section}
-
-  <div class="section">
-    <div class="section-title">Deal Strengths</div>
-    <div class="strengths-block">
-      <div class="col-title">Why this business is worth pursuing</div>
-      {strengths_html}
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Exit Motivation Hypothesis</div>
-    <div class="motivation-box">{motivation}</div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Advisor Note</div>
-    <div class="note-lbl">&#9873; For Marco</div>
-    <div class="note-box">{note}</div>
-  </div>
+  {sections_html}
 
 </div>
 
@@ -709,12 +698,25 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
         m = FOUNDED_RE.search(req.business_summary)
         if m:
             req.founded_year = m.group(1)
+    research = company_research(claude_client, RESEARCH_MODEL, req.company_name, domain_of(req.website),
+                                req.location)
+    if research:
+        notes.append("company research")
+        req.founded_year = req.founded_year or research.get("founded_year")
+        loc = (req.location or "").strip()
+        if research.get("hq") and (not loc or "," not in loc):
+            req.location = research["hq"]
+        req.employees = req.employees or research.get("employees")
+        req.ownership = req.ownership or research.get("ownership")
+        req.revenue = req.revenue or research.get("revenue")
+        if research.get("recent_developments") and no_news(req.recent_news):
+            req.recent_news = "\n".join(f"• {x}" for x in research["recent_developments"])
     owner_text, owner_status, why = resolve_owner_profile(claude_client, req)
     print(json.dumps({"event": "owner_identity", "company": req.company_name, "contact": req.lead_name,
                       "status": owner_status, "reason": why}), flush=True)
     req.owner_summary = owner_text
     words = prospect_words(thread or [])
-    assessment   = generate_assessment(req, owner_status, words or None)
+    assessment   = generate_assessment(req, owner_status, words or None, research.get("facts"))
     html_content = build_pdf_html(req, assessment, owner_status)
     pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
     if store_brief is None:
