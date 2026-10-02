@@ -144,6 +144,10 @@ def test_ingest_requires_key_and_upserts():
     assert r.json() == {"bookings": 1, "briefs": 1}
     st = c.get("/api/briefs/state", headers={"x-ingest-key": INGEST_KEY}).json()["bookings"]
     assert any(x["email"] == "paul@ikorindustries.com" and x["thread_count"] == 2 for x in st)
+    r = c.post("/api/briefs/ingest", headers={"x-ingest-key": INGEST_KEY}, json={"purge": ["paul@ikorindustries.com"]})
+    assert r.json()["purged"] == 1
+    st = c.get("/api/briefs/state", headers={"x-ingest-key": INGEST_KEY}).json()["bookings"]
+    assert not any(x["email"] == "paul@ikorindustries.com" for x in st)
 
 
 def test_booked_at_rules():

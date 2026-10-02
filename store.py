@@ -251,3 +251,14 @@ def set_campaigns(rows: list) -> int:
 def campaign_ids() -> set:
     with _lock, _conn() as c:
         return {r["id"] for r in c.execute("SELECT id FROM campaigns")}
+
+
+def purge(emails: list) -> int:
+    """Remove bookings and their briefs (Gamic-only, via the ingest key)."""
+    em = [e.strip().lower() for e in emails if e and "@" in e]
+    with _lock, _conn() as c:
+        n = 0
+        for e in em:
+            n += c.execute("DELETE FROM bookings WHERE email=?", (e,)).rowcount
+            c.execute("DELETE FROM briefs WHERE email=?", (e,))
+    return n

@@ -446,6 +446,8 @@ async def api_ingest(request: Request):
     out = {"bookings": 0, "briefs": 0}
     if isinstance(data.get("campaigns"), list):
         out["campaigns"] = store.set_campaigns(data["campaigns"])
+    if isinstance(data.get("purge"), list):
+        out["purged"] = store.purge(data["purge"])
     for d in data.get("bookings") or []:
         if ingest_booking(d, extract=bool(data.get("extract", True))):
             out["bookings"] += 1
