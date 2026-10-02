@@ -6,7 +6,7 @@ import threading
 import time
 import traceback
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -1043,6 +1043,30 @@ def _render_pdf(request_fields: dict, assessment: dict, owner_status: str) -> by
     return WeasyHTML(string=build_pdf_html(req, assessment, owner_status or "verified_upstream")).write_pdf()
 
 
+def _brief_from_booking(email: str):
+    """Build the brief for a stored booking (a calendar-only call once we know who it's with)."""
+    b = store.get_booking(store.bid_for(email)) or {}
+    req = BriefingRequest(lead_name=b.get("lead_name"), first_name=b.get("first_name"), email=email,
+                          company_name=b.get("company"), website=b.get("website"), location=b.get("location"))
+    notes = normalize(req)
+    if not claim(email):
+        return
+    try:
+        upcoming = (b.get("meeting_at") or "") >= datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        run_brief(req, notes, source="calendar", store_brief=True, post=upcoming)
+    except Exception as e:
+        print(json.dumps({"event": "brief_failed", "contact": req.lead_name, "via": "calendar", "error": str(e)[:300],
+                          "trace": traceback.format_exc()[-1500:]}), flush=True)
+    finally:
+        release(email)
+
+
+def _queue_brief(email: str):
+    threading.Thread(target=_brief_from_booking, args=(email,), daemon=True).start()
+
+
+calendar_sync.on_new_call = _queue_brief
 dashboard.configure(render_pdf=_render_pdf,
-                    extract_meeting=lambda thread, state: extract_meeting(claude_client, MEETING_MODEL, thread, state))
+                    extract_meeting=lambda thread, state: extract_meeting(claude_client, MEETING_MODEL, thread, state),
+                    build_brief=_queue_brief)
 app.include_router(dashboard.router)

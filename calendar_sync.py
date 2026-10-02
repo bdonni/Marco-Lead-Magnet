@@ -9,6 +9,7 @@ source "calendar", which outranks a hand-set time and the email thread.
 The iCal address is a secret. It is stored in the site's database (settings: calendar_ics_url) through the
 Gamic-only ingest API, never in this public repo.
 """
+import hashlib
 import json
 import re
 import threading
@@ -32,6 +33,16 @@ WINDOWS_TZ = {"Eastern Standard Time": "America/New_York", "Central Standard Tim
               "US Mountain Standard Time": "America/Phoenix", "UTC": "UTC"}
 LINE = re.compile(r'^([A-Z][A-Z0-9-]*)((?:;[A-Z0-9-]+=(?:"[^"]*"|[^:;]*))*):(.*)$', re.S)
 SYNC_EVERY = 300
+
+# Calls that are only on the calendar (no booking, no attendee list: Outlook's published feed drops attendees).
+# A client opts in with tenant config calendar_calls = {"include": <title regex>, "firm_tokens": [...]}. Each matching
+# event becomes a booking keyed by a placeholder address until someone says who the call is with.
+CAL_DOMAIN = "calendar.invalid"
+NOT_PEOPLE = ("zoom.us", "zoomcrc.com", "teams.microsoft.com", "microsoft.com", "calendly.com", "google.com",
+              "gamicmedia.com", "office365.com", "outlook.com", "aka.ms")
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+PHONE_RE = re.compile(r"\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b")
+on_new_call = None  # set by main: builds the brief for a booking the calendar just created
 
 _state = {"last_ok": None, "last_error": None, "events": 0, "matched": 0}
 
@@ -83,6 +94,8 @@ def parse_ics(text: str) -> list:
             cur["title"] = _unescape(value)
         elif name == "DESCRIPTION":
             cur["description"] = _unescape(value)[:4000]
+        elif name == "LOCATION":
+            cur["location"] = _unescape(value)[:300]
         elif name == "UID":
             cur["uid"] = value.strip()
         elif name == "STATUS":
@@ -117,8 +130,12 @@ def match(booking: dict, events: list, now: datetime) -> Optional[dict]:
     except ValueError:
         booked = now - timedelta(days=30)
     scored = []
+    uid = booking.get("meeting_event_uid")
     for ev in events:
         if ev.get("status") == "CANCELLED" or not ev.get("start"):
+            continue
+        if uid and ev.get("uid") == uid:  # the event this booking was created from or already tied to
+            scored.append((4, ev))
             continue
         if ev["start"] < booked - timedelta(days=2):
             continue  # an older meeting with the same company is not this call
@@ -141,6 +158,99 @@ def match(booking: dict, events: list, now: datetime) -> Optional[dict]:
     top = [ev for s, ev in scored if s == best]
     upcoming = sorted((ev for ev in top if ev["start"] >= now - timedelta(hours=2)), key=lambda e: e["start"])
     return upcoming[0] if upcoming else max(top, key=lambda e: e["start"])
+
+
+def placeholder_email(uid: str) -> str:
+    return f"cal-{hashlib.sha1((uid or '').encode()).hexdigest()[:12]}@{CAL_DOMAIN}"
+
+
+def is_placeholder(email: Optional[str]) -> bool:
+    return (email or "").lower().endswith("@" + CAL_DOMAIN)
+
+
+def parse_title(title: str, tokens: list, caller: str = "") -> tuple:
+    """(contact, company) from how calls get named: 'Call Antonio (All County)', 'ABC & HIA Meeting',
+    'Finest/ABC catch up', 'Danny Munro and Caleb Lyons'."""
+    t = re.sub(r"\s+", " ", title or "").strip()
+    tok = "|".join(re.escape(x) for x in tokens if x) or "(?!)"
+    tail = r"(?:\s+(?:meeting|call|catch[- ]?up|intro|chat|review|follow[- ]?up|check[- ]?in))*"
+    m = re.match(r"^call(?: with)? (.+?) \((.+?)\)", t, re.I)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    m = re.match(rf"^(?:{tok}) ?(?:&|\+|and|<>|x|/|-) ?(.+?){tail}\s*$", t, re.I)
+    if m:
+        return None, m.group(1).strip()
+    m = re.match(rf"^(.+?) ?(?:&|\+|and|<>|x|/|-) ?(?:{tok})\b{tail}.*$", t, re.I)
+    if m:
+        return None, m.group(1).strip()
+    if caller:
+        m = re.match(rf"^(.+?) and {re.escape(caller)}\b", t, re.I)
+        if m:
+            return m.group(1).strip(), None
+    m = re.match(r"^call(?: with)? (.+)$", t, re.I)
+    if m:
+        return m.group(1).strip(), None
+    return None, t or None
+
+
+def invite_hints(ev: dict) -> tuple:
+    """Outside email addresses and a phone number written into the invite."""
+    text = f"{ev.get('description') or ''}\n{ev.get('location') or ''}"
+    emails = []
+    for em in EMAIL_RE.findall(text):
+        em = em.lower().strip(".")
+        if _own(em) or any(em.split("@")[1].endswith(h) for h in NOT_PEOPLE) or em in emails:
+            continue
+        emails.append(em)
+    ph = PHONE_RE.search(ev.get("location") or "") or PHONE_RE.search(text)
+    return emails, (ph.group(0) if ph else None)
+
+
+def _calendar_calls(events: list, used: set, now: datetime) -> dict:
+    """Put calendar-only calls (last 7 days and upcoming) on the site; hide ones that were cancelled or removed."""
+    import tenant
+    cc = tenant.get("calendar_calls") or {}
+    if not cc.get("include"):
+        return {}
+    inc = re.compile(cc["include"], re.I)
+    tokens = cc.get("firm_tokens") or [tenant.get("sender_label") or ""]
+    caller = (tenant.get("caller") or "").split()[0] if tenant.get("caller") else ""
+    by_uid = {b.get("meeting_event_uid"): b for b in store.all_bookings_raw() if b.get("meeting_event_uid")}
+    live, added = set(), []
+    for ev in events:
+        uid, title = ev.get("uid"), (ev.get("title") or "")
+        if not uid or ev.get("status") == "CANCELLED" or not ev.get("start") or not inc.search(title):
+            continue
+        live.add(uid)
+        if uid in used or not (now - timedelta(days=7) <= ev["start"] <= now + timedelta(days=60)):
+            continue
+        at = ev["start"].replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        emails, phone = invite_hints(ev)
+        meeting = {"at": at, "text": (title + (f" · {phone}" if phone else ""))[:120], "quote": None,
+                   "source": "calendar", "uid": uid}
+        known = by_uid.get(uid)
+        if known:  # already on the site (maybe dismissed); only keep its time current
+            store.upsert_booking({"email": known["email"], "meeting": meeting})
+            continue
+        who, co = parse_title(title, tokens, caller)
+        key = emails[0] if emails else placeholder_email(uid)
+        store.upsert_booking({"email": key, "lead_name": who, "company": co, "meeting": meeting,
+                              "campaign_name": "From the calendar", "names_soft": True})
+        added.append(key)
+        if emails and on_new_call:
+            on_new_call(key)
+    for b in store.all_bookings_raw():  # a call that came from the calendar leaves the site when its event is cancelled
+        from_cal = is_placeholder(b.get("email")) or b.get("campaign_name") == "From the calendar"
+        if from_cal and b.get("meeting_event_uid") and b.get("meeting_event_uid") not in live and not b.get("hidden"):
+            try:
+                gone = datetime.fromisoformat((b.get("meeting_at") or "").replace("Z", "+00:00")) >= now
+            except ValueError:
+                gone = False
+            if gone:
+                store.upsert_booking({"email": b["email"], "hidden": True})
+    if added:
+        print(json.dumps({"event": "calendar_calls_added", "count": len(added)}), flush=True)
+    return {"calendar_calls_added": len(added)}
 
 
 def _own(email: str) -> bool:
@@ -189,7 +299,8 @@ def sync_once(url: Optional[str] = None) -> dict:
                  for e in events if e.get("uid") not in used and e["start"] >= now - timedelta(hours=2)
                  and e.get("status") != "CANCELLED" and (e.get("attendees") or [])]
     store.set_setting("calendar_unmatched", json.dumps(unmatched)[:200000])
-    return {"ok": True, "events": len(events), "matched": matched, "unmatched_upcoming": len(unmatched)}
+    extra = _calendar_calls(events, used, now)
+    return {"ok": True, "events": len(events), "matched": matched, "unmatched_upcoming": len(unmatched), **extra}
 
 
 def start_background_sync():

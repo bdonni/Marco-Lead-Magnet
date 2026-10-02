@@ -19,7 +19,8 @@ from typing import Any, Optional
 import requests
 
 GENERIC_EMAIL_DOMAINS = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com", "icloud.com",
-                         "live.com", "msn.com", "comcast.net", "att.net", "sbcglobal.net", "verizon.net"}
+                         "live.com", "msn.com", "comcast.net", "att.net", "sbcglobal.net", "verizon.net",
+                         "calendar.invalid"}  # the last one: a calendar-only call nobody has identified yet
 
 BLANKS = {"", "null", "none", "undefined", "n/a", "na", "[object object]"}
 

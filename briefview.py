@@ -85,7 +85,7 @@ def facts(req: dict, booking: Optional[dict] = None) -> list:
         ("Ownership", clean_fact(req.get("ownership") or req.get("company_type"))),
         ("Revenue", clean_fact(req.get("revenue"), 80)),
         ("Website", site or None),
-        ("Email", req.get("email") or b.get("email")),
+        ("Email", next((x for x in (req.get("email"), b.get("email")) if x and not x.endswith("@calendar.invalid")), None)),
     ]
     return [(k, str(v)) for k, v in rows if v]
 

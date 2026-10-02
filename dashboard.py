@@ -8,6 +8,7 @@ import hmac
 import html
 import json
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -40,14 +41,16 @@ ET = ZoneInfo("America/New_York")
 TZ_CHOICES = {"ET": "America/New_York", "CT": "America/Chicago", "MT": "America/Denver", "PT": "America/Los_Angeles"}
 
 router = APIRouter()
-_hooks = {"render_pdf": None, "extract_meeting": None}
+_hooks = {"render_pdf": None, "extract_meeting": None, "build_brief": None}
 
 
-def configure(render_pdf: Callable = None, extract_meeting: Callable = None):
+def configure(render_pdf: Callable = None, extract_meeting: Callable = None, build_brief: Callable = None):
     if render_pdf:
         _hooks["render_pdf"] = render_pdf
     if extract_meeting:
         _hooks["extract_meeting"] = extract_meeting
+    if build_brief:
+        _hooks["build_brief"] = build_brief
 
 
 def _ok(key: Optional[str], want: str) -> bool:
@@ -222,6 +225,8 @@ tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{backgrou
 .calltime{min-width:260px;background:var(--soft);border-radius:10px;padding:14px 16px}
 .calltime .big{font-size:20px;font-weight:700;line-height:1.25}
 .calltime form{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+form.identify{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+form.identify input{font:inherit;font-size:14px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);flex:1 1 200px;min-width:0}
 .calltime input,.calltime select{font:inherit;font-size:13px;padding:5px 7px;border:1px solid var(--line);border-radius:6px;
 background:var(--panel);color:var(--ink)}
 .btn{white-space:nowrap;font:inherit;font-size:13px;font-weight:600;padding:6px 12px;border-radius:8px;border:1px solid var(--accent);
@@ -327,7 +332,8 @@ def briefs_index(request: Request, key: Optional[str] = None, view: Optional[str
             label, cls = OWNER_BADGE.get(br.get("owner_status") or "", ("Brief ready", "ok"))
             brief = f"<span class='badge {cls}'>{e('Brief ready' if cls == 'ok' else label)}</span>"
         else:
-            brief = "<span class='badge bad'>No brief yet</span>"
+            brief = ("<span class='badge neutral'>Who is it with?</span>" if calendar_sync.is_placeholder(b.get("email"))
+                     else "<span class='badge bad'>No brief yet</span>")
         site = (b.get("website") or "").replace("https://", "").replace("http://", "").strip("/")
         search = " ".join(str(b.get(k) or "") for k in ("company", "lead_name", "email", "website", "location")).lower()
         trs.append(f"""<tr data-s="{e(search)}" onclick="location.href='/briefs/{e(b['bid'])}'">
@@ -431,6 +437,27 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     else:
         brief_html = "<div class='card empty'>The brief for this booking has not been generated yet.</div>"
 
+    if not br and calendar_sync.is_placeholder(b.get("email")):
+        owner = e(tenant.calendar_owner())
+        if editable:
+            brief_html = f"""<div class="card"><div class="briefhead"><b>Who is this call with?</b></div>
+<p class="muted">This call is on {owner} calendar, but the invite doesn't say which agency it is. Add the owner's email or the
+agency's website and the brief builds in about a minute.</p>
+<form method="post" action="/briefs/{e(b['bid'])}/identify" class="identify">
+<input name="company" value="{e(b.get('company') or '')}" placeholder="Agency name">
+<input name="who" placeholder="owner@agency.com or agency.com" required>
+<button class="btn" type="submit">Build brief</button></form>
+<form method="post" action="/briefs/{e(b['bid'])}/dismiss" style="margin-top:10px">
+<button class="btn ghost" type="submit">Not a client call, hide it</button></form></div>"""
+        else:
+            brief_html = f"<div class='card empty'>This call is on {owner} calendar. Its brief appears once we know who it's with.</div>"
+    parts = [b.get("lead_name") or "", b.get("title") or ""]
+    if calendar_sync.is_placeholder(b.get("email")):
+        parts.append(f"from {tenant.calendar_owner()} calendar")
+    elif b.get("booked_at"):
+        parts.append(f"booked {_fmt_day(b.get('booked_at'))}")
+    sub = " · ".join(x for x in parts if x)
+
     msgs = []
     for m in b.get("thread") or []:
         reply = m.get("type") == "REPLY"
@@ -450,7 +477,7 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResp
     back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else "<span></span>"
     body = f"""<div class="brandbar">{back_link}{_logo_tile()}</div>
 <div class="card hero"><div><h1>{e(b.get('company') or b.get('lead_name') or '(company unknown)')}</h1>
-<div class="sub">{e(b.get('lead_name') or '')}{(' · ' + e(b.get('title'))) if b.get('title') else ''} · booked {e(_fmt_day(b.get('booked_at')))}</div>
+<div class="sub">{e(sub)}</div>
 </div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
 <div class="card facts-card"><div class="facts">{facts_html}</div></div>
@@ -499,6 +526,49 @@ def set_meeting(request: Request, bid: str, date: str = Form(...), time: str = F
         "at": at.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "text": f"{date} {time} {tz}",
         "quote": None, "source": "manual"}})
     return RedirectResponse(f"/briefs/{bid}", status_code=303)
+
+
+EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+(?:\.[\w-]+)+$")
+
+
+@router.post("/briefs/{bid}/identify")
+def identify_call(request: Request, bid: str, who: str = Form(...), company: str = Form("")):
+    """A calendar-only call: someone says who it's with (owner email or agency website), then the brief builds."""
+    if not _viewer(request):
+        return locked()
+    b = store.get_booking(bid)
+    if not b:
+        raise HTTPException(status_code=404, detail="not found")
+    who = (who or "").strip().lower()
+    site = re.sub(r"^https?://|^www\.|/.*$", "", who) if not EMAIL_RE.match(who) else None
+    if not EMAIL_RE.match(who) and not (site and "." in site):
+        raise HTTPException(status_code=400, detail="add an email address or a website")
+    co = (company or "").strip() or b.get("company")
+    if EMAIL_RE.match(who) and who != b["email"]:
+        store.upsert_booking({"email": who, "lead_name": b.get("lead_name"), "company": co,
+                              "campaign_name": b.get("campaign_name"), "form_answers": b.get("form_answers"),
+                              "meeting": {"at": b.get("meeting_at"), "text": b.get("meeting_text"), "quote": None,
+                                          "source": b.get("meeting_source") or "calendar", "uid": b.get("meeting_event_uid")}})
+        store.upsert_booking({"email": b["email"], "hidden": True})
+        store.set_meeting_uid(b["email"], None)  # the real booking owns the calendar event now
+        target = who
+    else:
+        store.upsert_booking({"email": b["email"], "website": site, "company": co})
+        target = b["email"]
+    if _hooks["build_brief"]:
+        _hooks["build_brief"](target)
+    return RedirectResponse(f"/briefs/{store.bid_for(target)}", status_code=303)
+
+
+@router.post("/briefs/{bid}/dismiss")
+def dismiss_call(request: Request, bid: str):
+    if not _viewer(request):
+        return locked()
+    b = store.get_booking(bid)
+    if not b:
+        raise HTTPException(status_code=404, detail="not found")
+    store.upsert_booking({"email": b["email"], "hidden": True})
+    return RedirectResponse("/briefs", status_code=303)
 
 
 PDF_DIR = os.path.join(os.path.dirname(store.DB_PATH), "pdf")

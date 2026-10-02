@@ -173,6 +173,11 @@ def upsert_booking(d: dict) -> Optional[str]:
     return bid_for(email)
 
 
+def set_meeting_uid(email: str, uid: Optional[str]) -> None:
+    with _lock, _conn() as c:
+        c.execute("UPDATE bookings SET meeting_event_uid=? WHERE email=?", (uid, (email or "").lower()))
+
+
 def save_brief(email: Optional[str], company: Optional[str], lead_name: Optional[str], source: str,
                owner_status: Optional[str], request: dict, assessment: dict, posted: bool = False,
                created_at: Optional[str] = None) -> int:
@@ -320,4 +325,5 @@ def set_setting(key: str, value: Optional[str]) -> None:
 def all_bookings_raw() -> list:
     with _lock, _conn() as c:
         return [dict(r) for r in c.execute(
-            "SELECT email, bid, lead_name, company, booked_at, meeting_at, meeting_source, meeting_event_uid FROM bookings")]
+            "SELECT email, bid, lead_name, company, booked_at, meeting_at, meeting_source, meeting_event_uid, hidden, "
+            "campaign_name FROM bookings")]

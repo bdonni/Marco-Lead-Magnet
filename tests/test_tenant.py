@@ -170,6 +170,81 @@ def test_home_timezone_leads():
     assert dashboard._fmt_call("2026-10-01T18:00:00Z") == ("Thu 1 Oct", "1:00 PM CT · 2:00 PM ET")
 
 
+def test_calendar_only_calls_from_an_outlook_feed():
+    """Outlook's published feed has no attendees: client calls come in by title, and get identified on the site."""
+    import calendar_sync
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    f = lambda d: (now + d).strftime("%Y%m%dT%H%M%SZ")
+
+    def ev(uid, title, d, desc="", loc="", status=""):
+        return (f"BEGIN:VEVENT\nUID:{uid}\nSUMMARY:{title}\nDTSTART:{f(d)}\nDTEND:{f(d + timedelta(minutes=30))}\n"
+                f"DESCRIPTION:{desc}\nLOCATION:{loc}\n" + (f"STATUS:{status}\n" if status else "") + "END:VEVENT\n")
+    zoom = "Caitlin Scalzi is inviting you to a scheduled Zoom meeting. Join by SIP 3015204743@zoomcrc.com"
+    feed = {"text": "BEGIN:VCALENDAR\n" + "".join([
+        ev("u1", "ABC & HIA Meeting", timedelta(days=2), zoom),
+        ev("u2", "Call Antonio (All County)", -timedelta(days=1), loc="(561) 252-7887"),
+        ev("u3", "ABC & PRI Meeting", timedelta(days=3), zoom + " Steve: steve@priorityrisk.com, c.lyons@mailagencybrokerage.com"),
+        ev("u4", "Review Lobosco", timedelta(days=1)),
+        ev("u5", "Mike & Caleb", timedelta(hours=5)),
+        ev("u6", "ABC & OLD Meeting", timedelta(days=4), status="CANCELLED"),
+        ev("u7", "ABC & 413 Meeting", -timedelta(days=10)),
+    ]) + "END:VCALENDAR\n"}
+
+    class R:
+        status_code = 200
+        def raise_for_status(self): pass
+        @property
+        def text(self): return feed["text"]
+    calendar_sync.requests.get = lambda *a, **k: R()
+    store.set_setting("tenant_config", json.dumps({
+        "firm": "Agency Brokerage Consultants", "sender_label": "ABC", "caller": "Caleb", "mailbox_hint": "agencybrokerage",
+        "own_domains": ["agencybrokerage.com"],
+        "calendar_calls": {"include": r"^\s*(ABC\s*(&|and|<>)|.+/\s*ABC\b|call\s+\S|.+\band\s+caleb\b)", "firm_tokens": ["ABC"]}}))
+    built = []
+    calendar_sync.on_new_call = built.append
+    out = calendar_sync.sync_once("https://example.test/cal.ics")
+    assert out["calendar_calls_added"] == 3, out
+    hia = store.get_booking(store.bid_for(calendar_sync.placeholder_email("u1")))
+    assert hia["company"] == "HIA" and hia["meeting_source"] == "calendar" and hia["meeting_event_uid"] == "u1"
+    ant = store.get_booking(store.bid_for(calendar_sync.placeholder_email("u2")))
+    assert (ant["lead_name"], ant["company"]) == ("Antonio", "All County") and "(561) 252-7887" in ant["meeting_text"]
+    pri = store.get_booking(store.bid_for("steve@priorityrisk.com"))
+    assert pri["company"] == "PRI" and built == ["steve@priorityrisk.com"]   # an outside email in the invite: brief right away
+    for uid in ("u4", "u5", "u6", "u7"):
+        assert store.get_booking(store.bid_for(calendar_sync.placeholder_email(uid))) is None, uid
+    assert calendar_sync.sync_once("https://example.test/cal.ics")["calendar_calls_added"] == 0     # no duplicates
+
+    # the site: a placeholder asks who the call is with; identifying it moves the call to the real person
+    store.set_setting("view_key_sha256", hashlib.sha256(b"k").hexdigest())
+    c = TestClient(main.app)
+    c.cookies.set("mb_key", "k")
+    page = c.get(f"/briefs/{hia['bid']}").text
+    assert "Who is this call with?" in page and "calendar.invalid" not in page
+    asked = []
+    main.dashboard._hooks["build_brief"] = asked.append
+    r = c.post(f"/briefs/{hia['bid']}/identify", data={"who": "dean@hillsia.com", "company": "The Hills Insurance Agency"},
+               follow_redirects=False)
+    assert r.status_code == 303 and asked == ["dean@hillsia.com"]
+    dean = store.get_booking(store.bid_for("dean@hillsia.com"))
+    assert dean["company"] == "The Hills Insurance Agency" and dean["meeting_at"] == hia["meeting_at"]
+    assert dean["meeting_event_uid"] == "u1" and store.get_booking(hia["bid"])["hidden"] == 1
+    calendar_sync.sync_once("https://example.test/cal.ics")
+    assert store.get_booking(hia["bid"])["hidden"] == 1      # not recreated: the event belongs to Dean's booking now
+    # not a client call: hide it, and it stays hidden
+    assert c.post(f"/briefs/{ant['bid']}/dismiss", follow_redirects=False).status_code == 303
+    calendar_sync.sync_once("https://example.test/cal.ics")
+    assert store.get_booking(ant["bid"])["hidden"] == 1
+    # an upcoming placeholder whose event is cancelled leaves the site
+    feed["text"] = feed["text"].replace("SUMMARY:ABC & PRI Meeting", "SUMMARY:ABC & PRI Meeting\nSTATUS:CANCELLED")
+    calendar_sync.sync_once("https://example.test/cal.ics")
+    assert store.get_booking(store.bid_for("steve@priorityrisk.com"))["hidden"] == 1
+    assert store.get_booking(store.bid_for("dean@hillsia.com"))["hidden"] == 0
+    store.set_setting("tenant_config", json.dumps({"firm": "X"}))
+    assert calendar_sync.parse_title("Finest/ABC catch up", ["ABC"]) == (None, "Finest")
+    assert calendar_sync.parse_title("Danny Munro and Caleb Lyons", ["ABC"], "Caleb") == ("Danny Munro", None)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
