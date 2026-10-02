@@ -92,6 +92,18 @@ def test_booked_event_for_this_client_only():
     assert calls == ["rod@airproelite.com"]
 
 
+def test_own_account_client_takes_every_campaign():
+    calls = []
+    main._handle_booked = lambda bk, dry: calls.append(bk["email"])
+    store.set_setting("tenant_config", json.dumps({**json.loads(store.get_setting("tenant_config")), "all_campaigns": True}))
+    c = TestClient(main.app)
+    ev = {"event_type": "LEAD_CATEGORY_UPDATED", "event_id": "a1", "campaign_name": "Wave 5 Sell-Side",
+          "lead_category": {"new_id": 96272, "new_name": "Booked"}, "lead_data": {"email": "drew@trigonins.com"}}
+    assert c.post("/hooks/smartlead-booked", json=ev).json().get("queued")
+    time.sleep(0.3)
+    assert calls == ["drew@trigonins.com"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

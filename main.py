@@ -868,7 +868,8 @@ def accept_booked(payload: dict, dry_run: bool = False) -> dict:
     """A Marco/CRR lead tagged Booked: store the booking + thread and build (and post) the brief now."""
     if not is_booked_event(payload, tenant.get("booked_category_ids")):
         return {"ok": True, "ignored": "not a Booked category event"}
-    if not is_tenant_event(payload, tenant.campaign_regex(), tenant.get("mailbox_hint") or "", store.campaign_ids()):
+    if not (tenant.get("all_campaigns") or
+            is_tenant_event(payload, tenant.campaign_regex(), tenant.get("mailbox_hint") or "", store.campaign_ids())):
         routed = route_to_other_client(payload)
         return {"ok": True, "routed": routed} if routed else {"ok": True, "ignored": "not this client's campaign"}
     bk = booking_from_payload(payload)
