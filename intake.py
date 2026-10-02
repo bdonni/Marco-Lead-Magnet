@@ -141,6 +141,49 @@ def normalize(req) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Our lead record wins on who the person is
+# ---------------------------------------------------------------------------
+# Clay's person enrichment named the Imex contact "Adam Said"; our Smartlead lead is Adam Zilberbaum.
+# When SMARTLEAD_API_KEY is set, the lead record (looked up by email) supplies name, company and
+# state. Without the key this is a no-op.
+
+def smartlead_lead(email: Optional[str], api_key: str) -> dict:
+    if not api_key or not email or "@" not in email:
+        return {}
+    try:
+        r = requests.get("https://server.smartlead.ai/api/v1/leads/", params={"api_key": api_key, "email": email},
+                         timeout=10, headers={"User-Agent": "curl/8.4.0"})
+        data = r.json() if r.status_code == 200 else {}
+        return data if isinstance(data, dict) and data.get("email") else {}
+    except Exception:
+        return {}
+
+
+def apply_lead_record(req, rec: dict, notes: list) -> None:
+    if not rec:
+        return
+    fn = (rec.get("first_name") or "").strip()
+    ln = (rec.get("last_name") or "").strip()
+    full = f"{fn} {ln}".strip()
+    if fn and ln and (req.lead_name or "").strip().lower() != full.lower():
+        notes.append(f"lead_name from Smartlead record (was {req.lead_name or 'blank'})")
+        req.lead_name = full
+    if fn and not req.first_name:
+        req.first_name = fn
+    cf = rec.get("custom_fields") or {}
+    company = (cf.get("clean_company") or rec.get("company_name") or "").strip()
+    if company and (not req.company_name or "company from domain" in notes):
+        req.company_name = company
+        notes.append("company from Smartlead record")
+    site = domain_of(rec.get("website") or rec.get("company_url") or "")
+    if site and (not req.website or "website from email domain" in notes):
+        req.website = site
+    state = (cf.get("state") or rec.get("location") or "").strip()
+    if state and not req.location:
+        req.location = state
+
+
+# ---------------------------------------------------------------------------
 # Dedupe (Clay retries and Smartlead redeliveries must not produce a second card)
 # ---------------------------------------------------------------------------
 

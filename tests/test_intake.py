@@ -138,6 +138,27 @@ def test_endpoints_with_stubs():
     assert calls["fwd"] == [(target, "ev-9")]
 
 
+def test_smartlead_record_wins_on_name_and_company():
+    # Imex, 2026-09-30: Clay's enrichment named the contact "Adam Said"; our lead is Adam Zilberbaum.
+    from intake import apply_lead_record
+    r = make_req(lead_name="Adam Said", first_name="Adam", email="adam@imexdopplers.com", company_name="Imex",
+                 website="imexdopplers.com")
+    notes = normalize(r)
+    apply_lead_record(r, {"email": "adam@imexdopplers.com", "first_name": "Adam", "last_name": "Zilberbaum",
+                          "company_name": "Imex", "custom_fields": {"state": "Maryland"}}, notes)
+    assert r.lead_name == "Adam Zilberbaum" and r.location == "Maryland" and r.company_name == "Imex"
+    # a domain-derived company name gives way to the record
+    r2 = make_req(first_name="Jeff", email="jeff@gcpaint.com")
+    n2 = normalize(r2)
+    apply_lead_record(r2, {"email": "jeff@gcpaint.com", "first_name": "Jeff", "last_name": "Theisen",
+                           "company_name": "Gunslinger Custom Paint", "website": "gcpaint.com"}, n2)
+    assert (r2.lead_name, r2.company_name) == ("Jeff Theisen", "Gunslinger Custom Paint")
+    # no record: nothing changes
+    r3 = make_req(lead_name="Mark Falkowski", email="mark.falkowski@pyrexar.com", company_name="Pyrexar Medical")
+    apply_lead_record(r3, {}, [])
+    assert r3.lead_name == "Mark Falkowski"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

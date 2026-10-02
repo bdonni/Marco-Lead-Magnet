@@ -15,10 +15,11 @@ from weasyprint import HTML as WeasyHTML
 
 from identity import resolve_owner_profile
 from intake import (flatten, normalize, seen_recently, brief_key, overview_from_site, domain_of,
-                    CLAY_WEBHOOK_RE, forward_to_clay)
+                    smartlead_lead, apply_lead_record, CLAY_WEBHOOK_RE, forward_to_clay)
 
 BRIEF_DEDUPE_SECONDS = int(os.environ.get("BRIEF_DEDUPE_SECONDS", "10800"))
 OVERVIEW_MODEL = os.environ.get("OVERVIEW_MODEL", "claude-sonnet-4-6")
+SMARTLEAD_API_KEY = os.environ.get("SMARTLEAD_API_KEY", "")
 
 app = FastAPI()
 
@@ -624,6 +625,7 @@ def post_to_slack_debug(req: BriefingRequest, assessment: dict, pdf_bytes: bytes
     return post_to_slack(req, assessment, pdf_bytes)
 
 def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False) -> dict:
+    apply_lead_record(req, smartlead_lead(req.email, SMARTLEAD_API_KEY), notes)
     if not req.business_summary and req.website:
         overview = overview_from_site(claude_client, OVERVIEW_MODEL, req.company_name, domain_of(req.website))
         if overview:
