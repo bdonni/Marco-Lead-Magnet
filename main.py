@@ -9,21 +9,27 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, model_validator
 from anthropic import Anthropic
 from weasyprint import HTML as WeasyHTML
 
+import store
+import dashboard
 from identity import resolve_owner_profile
+from bookings import is_booked_event, is_marco_event, booking_from_payload, prospect_words, extract_meeting
 from intake import (flatten, normalize, seen_recently, brief_key, overview_from_site, domain_of,
                     smartlead_lead, apply_lead_record, CLAY_WEBHOOK_RE, forward_to_clay)
 
 BRIEF_DEDUPE_SECONDS = int(os.environ.get("BRIEF_DEDUPE_SECONDS", "10800"))
 OVERVIEW_MODEL = os.environ.get("OVERVIEW_MODEL", "claude-sonnet-4-6")
 SMARTLEAD_API_KEY = os.environ.get("SMARTLEAD_API_KEY", "")
+MEETING_MODEL = os.environ.get("MEETING_MODEL", "claude-haiku-4-5")
 
 app = FastAPI()
 
 claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+store.init()
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 SLACK_BOT_TOKEN   = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -107,7 +113,8 @@ def years_operating(founded_year) -> Optional[int]:
 # Claude assessment
 # ---------------------------------------------------------------------------
 
-def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upstream") -> dict:
+def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upstream",
+                        thread_text: Optional[str] = None) -> dict:
     parts = []
     if req.business_summary:
         parts.append(f"BUSINESS OVERVIEW:\n{req.business_summary}")
@@ -123,6 +130,8 @@ def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upst
         parts.append(f"YEARS IN BUSINESS: {yrs}")
     if req.location:
         parts.append(f"LOCATION: {extract_city_state(req.location)}")
+    if thread_text:
+        parts.append(f"WHAT THEY HAVE WRITTEN TO US BY EMAIL (their own words, oldest first):\n{thread_text}")
 
     context = "\n\n".join(parts) or "Limited information available."
 
@@ -132,7 +141,7 @@ Marco is about to speak with {req.lead_name or "the owner"} at {req.company_name
 
 {context}
 
-Rules: never say or imply that {req.lead_name or "the contact"} works somewhere else, is someone else, or is not connected to {req.company_name or "the company"}. If the owner profile is not verified, do not guess tenure or age; tell Marco what to confirm early in the call instead.
+Rules: never say or imply that {req.lead_name or "the contact"} works somewhere else, is someone else, or is not connected to {req.company_name or "the company"}. If the owner profile is not verified, do not guess tenure or age; tell Marco what to confirm early in the call instead. When their emails say what they want or what worries them (timeline, price, financing, a partner joining), build the briefing note around that. Never invent anything they did not write.
 
 Generate a concise M&A briefing. Return ONLY valid JSON with exactly these fields, no preamble, no markdown, no em dashes anywhere in your output:
 
@@ -624,38 +633,91 @@ def post_to_slack_debug(req: BriefingRequest, assessment: dict, pdf_bytes: bytes
     """Wrapper that returns debug info from post_to_slack."""
     return post_to_slack(req, assessment, pdf_bytes)
 
-def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False) -> dict:
+_inflight = set()
+_inflight_lock = threading.Lock()
+
+
+def claim(email: Optional[str], force: bool = False) -> bool:
+    """One brief per booked lead: skip while one is being built or after one was posted in the last 24h."""
+    if not email:
+        return True
+    email = email.lower()
+    with _inflight_lock:
+        if email in _inflight:
+            return False
+        if not force and store.posted_recently(email, hours=24):
+            return False
+        _inflight.add(email)
+        return True
+
+
+def release(email: Optional[str]) -> None:
+    if email:
+        with _inflight_lock:
+            _inflight.discard(email.lower())
+
+
+FOUNDED_RE = re.compile(r"(?:founded|established|since|incorporated|started)\D{0,25}(1[89]\d\d|20[0-2]\d)", re.I)
+
+
+def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: Optional[list] = None,
+              source: str = "clay", post: bool = True, store_brief: Optional[bool] = None,
+              booked_now: bool = False) -> dict:
     apply_lead_record(req, smartlead_lead(req.email, SMARTLEAD_API_KEY), notes)
+    if thread is None and req.email:
+        b = store.get_booking(store.bid_for(req.email))
+        thread = (b or {}).get("thread") or []
     if not req.business_summary and req.website:
         overview = overview_from_site(claude_client, OVERVIEW_MODEL, req.company_name, domain_of(req.website))
         if overview:
             req.business_summary = overview
             notes.append("business overview from company site")
+    if not req.founded_year and req.business_summary:
+        m = FOUNDED_RE.search(req.business_summary)
+        if m:
+            req.founded_year = m.group(1)
     owner_text, owner_status, why = resolve_owner_profile(claude_client, req)
     print(json.dumps({"event": "owner_identity", "company": req.company_name, "contact": req.lead_name,
                       "status": owner_status, "reason": why}), flush=True)
     req.owner_summary = owner_text
-    assessment   = generate_assessment(req, owner_status)
+    words = prospect_words(thread or [])
+    assessment   = generate_assessment(req, owner_status, words or None)
     html_content = build_pdf_html(req, assessment, owner_status)
     pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
+    if store_brief is None:
+        store_brief = not dry_run
+    posted, slack_debug = False, None
+    if not dry_run and post:
+        slack_debug = post_to_slack(req, assessment, pdf_bytes, owner_status)
+        posted = True
+    if store_brief:
+        store.save_brief(req.email, req.company_name, req.lead_name, source + ("-dry" if dry_run else ""),
+                         owner_status, req.model_dump(), assessment, posted)
+        if req.email:
+            store.upsert_booking({"email": req.email, "lead_name": req.lead_name, "first_name": req.first_name,
+                                  "company": req.company_name, "website": req.website, "location": req.location,
+                                  "title": req.title, "booked_at": store.now_iso() if booked_now else None})
     if dry_run:
         return {"status": "dry_run", "company": req.company_name, "lead_name": req.lead_name,
                 "owner_status": owner_status, "owner_reason": why, "owner_profile": owner_text,
                 "business_summary": req.business_summary, "founded_year": req.founded_year,
-                "location": req.location, "notes": notes, "pdf_bytes": len(pdf_bytes), "assessment": assessment}
-    slack_debug  = post_to_slack(req, assessment, pdf_bytes, owner_status)
-    print(json.dumps({"event": "brief_posted", "company": req.company_name, "contact": req.lead_name,
-                      "owner_status": owner_status, "notes": notes,
-                      "slack_ok": bool((slack_debug or {}).get("step3", {}).get("ok"))}), flush=True)
+                "location": req.location, "notes": notes, "pdf_bytes": len(pdf_bytes), "stored": bool(store_brief),
+                "used_thread": bool(words), "assessment": assessment}
+    print(json.dumps({"event": "brief_posted" if posted else "brief_stored", "company": req.company_name,
+                      "contact": req.lead_name, "owner_status": owner_status, "notes": notes, "source": source,
+                      "slack_ok": posted}), flush=True)
     return {"status": "success", "company": req.company_name, "owner_status": owner_status, "slack_debug": slack_debug}
 
 
-def _run_brief_logged(req: BriefingRequest, notes: list):
+def _run_brief_logged(req: BriefingRequest, notes: list, claimed: bool = True, **kw):
     try:
-        run_brief(req, notes)
+        run_brief(req, notes, **kw)
     except Exception as e:
         print(json.dumps({"event": "brief_failed", "company": req.company_name, "contact": req.lead_name,
                           "error": str(e)[:300], "trace": traceback.format_exc()[-1500:]}), flush=True)
+    finally:
+        if claimed:
+            release(req.email)
 
 
 @app.post("/generate-briefing")
@@ -673,13 +735,89 @@ def generate_briefing(req: BriefingRequest, dry_run: bool = False, force: bool =
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     # Ack at once and build in the background: Clay's HTTP column retries slow calls, and a retry
-    # would post a second card. Same lead + company inside the dedupe window is skipped.
-    if not force and seen_recently(brief_key(req), BRIEF_DEDUPE_SECONDS):
+    # would post a second card. The direct Smartlead "Booked" hook usually gets there first; Clay's call
+    # for the same lead is then skipped.
+    dup = (not claim(req.email, force)) if req.email else (not force and seen_recently(brief_key(req), BRIEF_DEDUPE_SECONDS))
+    if dup:
         print(json.dumps({"event": "brief_duplicate_skipped", "company": req.company_name,
-                          "contact": req.lead_name}), flush=True)
+                          "contact": req.lead_name, "via": "clay"}), flush=True)
         return {"status": "duplicate_skipped", "company": req.company_name}
-    threading.Thread(target=_run_brief_logged, args=(req, notes), daemon=True).start()
+    threading.Thread(target=_run_brief_logged, args=(req, notes),
+                     kwargs={"source": "clay", "booked_now": True}, daemon=True).start()
     return {"status": "queued", "company": req.company_name, "contact": req.lead_name}
+
+
+def _handle_booked(bk: dict, dry_run: bool):
+    email = bk["email"]
+    dashboard.ingest_booking({k: v for k, v in bk.items() if k != "linkedin"})
+    req = BriefingRequest(lead_name=bk.get("lead_name"), first_name=bk.get("first_name"), email=email,
+                          company_name=bk.get("company"), website=bk.get("website"), location=bk.get("location"))
+    notes = normalize(req)
+    if not dry_run and not claim(email):
+        print(json.dumps({"event": "brief_duplicate_skipped", "company": req.company_name,
+                          "contact": req.lead_name, "via": "smartlead-booked"}), flush=True)
+        return
+    try:
+        run_brief(req, notes, dry_run=dry_run, thread=bk.get("thread") or None, source="smartlead-booked",
+                  store_brief=True)
+    except Exception as e:
+        print(json.dumps({"event": "brief_failed", "company": req.company_name, "contact": req.lead_name,
+                          "via": "smartlead-booked", "error": str(e)[:300],
+                          "trace": traceback.format_exc()[-1500:]}), flush=True)
+    finally:
+        if not dry_run:
+            release(email)
+
+
+@app.post("/hooks/smartlead-booked")
+async def smartlead_booked(request: Request, dry_run: bool = False):
+    """Smartlead account webhook (Lead category updated). A Marco/CRR lead tagged Booked gets its brief
+    built and posted at once, and its booking + email thread land on the brief site."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    if not is_booked_event(payload):
+        return {"ok": True, "ignored": "not a Booked category event"}
+    if not is_marco_event(payload, store.campaign_ids()):
+        return {"ok": True, "ignored": "not a Marco campaign"}
+    bk = booking_from_payload(payload)
+    if not bk.get("email"):
+        return {"ok": True, "ignored": "no lead email"}
+    key = payload.get("event_id") or f"{bk['email']}|{payload.get('event_timestamp')}"
+    if not dry_run and seen_recently(f"booked:{key}", 6 * 3600):
+        return {"ok": True, "duplicate": True}
+    print(json.dumps({"event": "booked_received", "email": bk["email"], "company": bk.get("company"),
+                      "campaign": payload.get("campaign_name"), "thread": len(bk.get("thread") or []),
+                      "dry_run": dry_run}), flush=True)
+    threading.Thread(target=_handle_booked, args=(bk, dry_run), daemon=True).start()
+    return {"ok": True, "queued": True}
+
+
+@app.post("/api/briefs/generate")
+async def api_generate(request: Request):
+    """Gamic-only (ingest key): build a brief for a stored booking. post=false stores it on the site only."""
+    dashboard._ingest(request)
+    data = await request.json()
+    email = (data.get("email") or "").strip().lower()
+    b = store.get_booking(store.bid_for(email)) if email else None
+    if not b:
+        raise HTTPException(status_code=404, detail="no booking for that email")
+    req = BriefingRequest(lead_name=data.get("lead_name") or b.get("lead_name"), first_name=b.get("first_name"),
+                          email=email, company_name=data.get("company_name") or b.get("company"),
+                          website=b.get("website"), location=b.get("location"),
+                          business_summary=data.get("business_summary"), owner_summary=data.get("owner_summary"),
+                          founded_year=data.get("founded_year"), recent_news=data.get("recent_news"))
+    notes = normalize(req)
+    post = bool(data.get("post"))
+    if post and not claim(email, bool(data.get("force"))):
+        return {"status": "duplicate_skipped"}
+    threading.Thread(target=_run_brief_logged, args=(req, notes),
+                     kwargs={"source": "admin", "post": post, "store_brief": True, "claimed": post},
+                     daemon=True).start()
+    return {"status": "queued", "post": post, "company": req.company_name}
 
 
 @app.post("/hooks/smartlead-slim")
@@ -705,3 +843,18 @@ async def smartlead_slim(request: Request, to: str = ""):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/")
+async def root():
+    return RedirectResponse("/briefs", status_code=307)
+
+
+def _render_pdf(request_fields: dict, assessment: dict, owner_status: str) -> bytes:
+    req = BriefingRequest(**{k: v for k, v in (request_fields or {}).items() if k in BriefingRequest.model_fields})
+    return WeasyHTML(string=build_pdf_html(req, assessment, owner_status or "verified_upstream")).write_pdf()
+
+
+dashboard.configure(render_pdf=_render_pdf,
+                    extract_meeting=lambda thread, state: extract_meeting(claude_client, MEETING_MODEL, thread, state))
+app.include_router(dashboard.router)

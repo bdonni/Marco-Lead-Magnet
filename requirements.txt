@@ -4,3 +4,4 @@ anthropic
 weasyprint
 resend
 pydantic
+python-multipart

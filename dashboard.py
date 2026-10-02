@@ -1,0 +1,463 @@
+"""Marco's pre-call brief site: every booked call, when it is, the email thread and the brief.
+
+Access is a private link (?key=...). Only the SHA-256 of each key is in this public repo; the keys
+themselves live with Gamic. DASHBOARD_KEY_SHA256 / INGEST_KEY_SHA256 env vars override the defaults.
+"""
+import hashlib
+import hmac
+import html
+import json
+import os
+import threading
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Optional
+
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+
+import store
+from bookings import normalize_thread
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
+
+VIEW_KEY_SHA256 = os.environ.get("DASHBOARD_KEY_SHA256",
+                                 "7f274d0b11225490c338020f316135d59b70619fed2fe9f60989a93d0d2f6a99")
+INGEST_KEY_SHA256 = os.environ.get("INGEST_KEY_SHA256",
+                                   "81236eb1d08cfa7fa5affa84909706f9ba478294ee527669462c5f23a3092602")
+COOKIE = "mb_key"
+CT = ZoneInfo("America/Chicago")
+ET = ZoneInfo("America/New_York")
+TZ_CHOICES = {"ET": "America/New_York", "CT": "America/Chicago", "MT": "America/Denver", "PT": "America/Los_Angeles"}
+
+router = APIRouter()
+_hooks = {"render_pdf": None, "extract_meeting": None}
+
+
+def configure(render_pdf: Callable = None, extract_meeting: Callable = None):
+    if render_pdf:
+        _hooks["render_pdf"] = render_pdf
+    if extract_meeting:
+        _hooks["extract_meeting"] = extract_meeting
+
+
+def _ok(key: Optional[str], want: str) -> bool:
+    if not key:
+        return False
+    return hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), want)
+
+
+def _viewer(request: Request) -> bool:
+    return _ok(request.cookies.get(COOKIE), VIEW_KEY_SHA256)
+
+
+def _ingest(request: Request) -> None:
+    if not _ok(request.headers.get("x-ingest-key"), INGEST_KEY_SHA256):
+        raise HTTPException(status_code=401, detail="bad ingest key")
+
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+def _dt(iso: Optional[str]) -> Optional[datetime]:
+    if not iso:
+        return None
+    try:
+        d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _fmt_call(iso: Optional[str]) -> tuple:
+    d = _dt(iso)
+    if not d:
+        return ("", "")
+    ct, et = d.astimezone(CT), d.astimezone(ET)
+    day = ct.strftime("%a %-d %b")
+    return (day, f"{ct.strftime('%-I:%M %p')} CT · {et.strftime('%-I:%M %p')} ET")
+
+
+def _fmt_day(iso: Optional[str]) -> str:
+    d = _dt(iso)
+    return d.astimezone(CT).strftime("%-d %b %Y") if d else ""
+
+
+def _fmt_stamp(iso: Optional[str]) -> str:
+    d = _dt(iso)
+    return d.astimezone(CT).strftime("%a %-d %b, %-I:%M %p CT") if d else ""
+
+
+def _rel(iso: Optional[str]) -> str:
+    d = _dt(iso)
+    if not d:
+        return ""
+    now = datetime.now(timezone.utc)
+    secs = (d - now).total_seconds()
+    if -5400 < secs < 0:
+        return "now"
+    if 0 <= secs < 3600:
+        return f"in {max(1, int(secs // 60))} min"
+    if 0 <= secs < 86400 and d.astimezone(CT).date() == now.astimezone(CT).date():
+        return f"today, in {int(secs // 3600)}h"
+    if d.astimezone(CT).date() == (now.astimezone(CT) + timedelta(days=1)).date():
+        return "tomorrow"
+    if secs > 0:
+        return f"in {int(secs // 86400)} days" if secs >= 2 * 86400 else "in 1 day"
+    return f"{int(-secs // 86400)}d ago" if -secs >= 86400 else "earlier today"
+
+
+def e(s) -> str:
+    return html.escape("" if s is None else str(s))
+
+
+def _para(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    blocks = [b.strip() for b in str(text).replace("\r", "").split("\n\n") if b.strip()]
+    out = []
+    for b in blocks:
+        lines = [l.strip() for l in b.split("\n") if l.strip()]
+        if lines and all(l.startswith(("•", "-", "*")) for l in lines):
+            out.append("<ul>" + "".join(f"<li>{e(l.lstrip('•-* ').strip())}</li>" for l in lines) + "</ul>")
+        else:
+            out.append("<p>" + "<br>".join(e(l) for l in lines) + "</p>")
+    return "".join(out)
+
+
+OWNER_BADGE = {
+    "verified_upstream": ("Owner verified", "ok"),
+    "verified_research": ("Owner verified", "ok"),
+    "unverified": ("Owner unverified", "warn"),
+}
+
+
+def _bucket(b: dict) -> str:
+    d = _dt(b.get("meeting_at"))
+    if not d:
+        return "unset"
+    return "upcoming" if d > datetime.now(timezone.utc) - timedelta(hours=2) else "past"
+
+
+def _ordered(rows: list) -> list:
+    """Upcoming calls soonest first, then bookings without a time (newest booking first), then past calls."""
+    up = sorted((b for b in rows if _bucket(b) == "upcoming"), key=lambda b: b.get("meeting_at") or "")
+    unset = sorted((b for b in rows if _bucket(b) == "unset"), key=lambda b: b.get("booked_at") or "", reverse=True)
+    past = sorted((b for b in rows if _bucket(b) == "past"), key=lambda b: b.get("meeting_at") or "", reverse=True)
+    return up + unset + past
+
+
+# ---------------------------------------------------------------------------
+# Page shell
+# ---------------------------------------------------------------------------
+
+CSS = """
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#14171c;--muted:#5d6672;--line:#e3e6ea;--soft:#f0f2f5;--accent:#1f4fd8;
+--accent-ink:#fff;--ok:#127a46;--ok-bg:#e6f5ec;--warn:#9a5b00;--warn-bg:#fff3dc;--bad:#b42318;--bad-bg:#fdecea;
+--chip:#eef1f6;--shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1115;--panel:#171a21;--ink:#e8eaee;
+--muted:#9aa3ae;--line:#2a2f39;--soft:#1d212a;--accent:#6b8cff;--accent-ink:#0b0d12;--ok:#4ade80;--ok-bg:#12261b;
+--warn:#fbbf24;--warn-bg:#2a2112;--bad:#f87171;--bad-bg:#2c1515;--chip:#232834;--shadow:none}}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 60px}
+header.top{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+h1{font-size:26px;line-height:1.2;margin:0;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:14px;margin-top:4px}
+.stats{display:flex;gap:10px;flex-wrap:wrap}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 14px;min-width:96px;box-shadow:var(--shadow)}
+.stat b{display:block;font-size:20px;line-height:1.2}.stat span{color:var(--muted);font-size:12px}
+.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 14px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab{padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-size:13px}
+.tab.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}.tab:hover{text-decoration:none}
+.search{flex:1;min-width:200px;max-width:340px;margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid var(--line);
+background:var(--panel);color:var(--ink);font:inherit}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;
+padding:12px 14px;border-bottom:1px solid var(--line)}
+td{padding:14px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{background:var(--soft)}
+.when b{display:block}.when small,.muted{color:var(--muted)}small{font-size:12.5px}
+.co{font-weight:600}.rel{display:inline-block;margin-top:2px;font-size:12px;color:var(--accent);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.badge.ok{color:var(--ok);background:var(--ok-bg)}.badge.warn{color:var(--warn);background:var(--warn-bg)}
+.badge.bad{color:var(--bad);background:var(--bad-bg)}.badge.neutral{color:var(--muted);background:var(--chip)}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+.back{display:inline-block;margin-bottom:14px;font-size:14px}
+.hero{padding:22px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.chip{background:var(--chip);border-radius:6px;padding:3px 9px;font-size:13px;color:var(--ink)}
+.calltime{min-width:260px;background:var(--soft);border-radius:10px;padding:14px 16px}
+.calltime .big{font-size:20px;font-weight:700;line-height:1.25}
+.calltime form{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.calltime input,.calltime select{font:inherit;font-size:13px;padding:5px 7px;border:1px solid var(--line);border-radius:6px;
+background:var(--panel);color:var(--ink)}
+.btn{font:inherit;font-size:13px;font-weight:600;padding:6px 12px;border-radius:8px;border:1px solid var(--accent);
+background:var(--accent);color:var(--accent-ink);cursor:pointer}
+.btn.ghost{background:transparent;color:var(--accent)}
+.cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:18px;margin-top:18px}
+.sec{padding:18px 20px}.sec+.sec{border-top:1px solid var(--line)}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 8px}
+.sec p{margin:0 0 10px}.sec ul{margin:0;padding-left:20px}.sec li{margin-bottom:6px}
+.briefhead{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--line)}
+.thread{max-height:none}
+.msg{padding:14px 18px;border-bottom:1px solid var(--line)}.msg:last-child{border-bottom:0}
+.msg .meta{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;color:var(--muted);margin-bottom:6px}
+.msg .who{font-weight:700;color:var(--ink)}.msg.reply{background:var(--soft)}
+.msg .body{white-space:pre-wrap;word-wrap:break-word;font-size:14px}
+.foot{margin-top:26px;color:var(--muted);font-size:12.5px;text-align:center}
+@media (max-width:860px){.cols{grid-template-columns:1fr}}
+@media (max-width:700px){.wrap{padding:18px 16px 40px}thead{display:none}table,tbody,tr,td{display:block;width:100%}
+tbody tr{padding:12px 14px;border-bottom:1px solid var(--line)}td{border:0;padding:3px 0}
+td.col-thread{display:none}.search{max-width:none;margin-left:0}}
+"""
+
+
+def page(title: str, body: str) -> HTMLResponse:
+    doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<title>{e(title)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>{CSS}</style></head><body><div class="wrap">{body}
+<div class="foot">Prepared for Carrara Strategy by Gamic · refreshed live from bookings</div></div></body></html>"""
+    return HTMLResponse(doc, headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"})
+
+
+def locked() -> HTMLResponse:
+    body = """<div class="card empty" style="margin-top:80px"><h1 style="font-size:20px;margin-bottom:6px">Pre-Call Briefs</h1>
+<p>This page needs your private access link. Ask Gamic to resend it.</p></div>"""
+    r = page("Pre-Call Briefs", body)
+    r.status_code = 401
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Pages
+# ---------------------------------------------------------------------------
+
+@router.get("/briefs", response_class=HTMLResponse)
+def briefs_index(request: Request, key: Optional[str] = None, view: str = "upcoming"):
+    if key is not None:
+        if not _ok(key, VIEW_KEY_SHA256):
+            return locked()
+        r = RedirectResponse("/briefs", status_code=303)
+        r.set_cookie(COOKIE, key, max_age=180 * 86400, httponly=True, secure=True, samesite="lax")
+        return r
+    if not _viewer(request):
+        return locked()
+
+    rows = _ordered(store.list_bookings())
+    counts = {k: sum(1 for b in rows if _bucket(b) == k) for k in ("upcoming", "unset", "past")}
+    now = datetime.now(timezone.utc)
+    week = sum(1 for b in rows if _bucket(b) == "upcoming" and _dt(b["meeting_at"]) < now + timedelta(days=7))
+    view = view if view in ("upcoming", "unset", "past", "all") else "upcoming"
+    shown = rows if view == "all" else [b for b in rows if _bucket(b) == view]
+
+    trs = []
+    for b in shown:
+        day, hours = _fmt_call(b.get("meeting_at"))
+        when = (f"<b>{e(day)}</b><small>{e(hours)}</small><br><span class='rel'>{e(_rel(b.get('meeting_at')))}</span>"
+                if day else "<span class='badge neutral'>Time not set</span>")
+        br = b.get("brief")
+        if br:
+            label, cls = OWNER_BADGE.get(br.get("owner_status") or "", ("Brief ready", "ok"))
+            brief = f"<span class='badge {cls}'>{e('Brief ready' if cls == 'ok' else label)}</span>"
+        else:
+            brief = "<span class='badge bad'>No brief yet</span>"
+        site = (b.get("website") or "").replace("https://", "").replace("http://", "").strip("/")
+        search = " ".join(str(b.get(k) or "") for k in ("company", "lead_name", "email", "website", "location")).lower()
+        trs.append(f"""<tr data-s="{e(search)}" onclick="location.href='/briefs/{e(b['bid'])}'">
+<td class="when">{when}</td>
+<td><div class="co"><a href="/briefs/{e(b['bid'])}">{e(b.get('company') or '(company unknown)')}</a></div><small class="muted">{e(site)}</small></td>
+<td>{e(b.get('lead_name') or b.get('first_name') or '')}<br><small class="muted">{e(b.get('location') or '')}</small></td>
+<td>{e(_fmt_day(b.get('booked_at')))}</td>
+<td>{brief}</td>
+<td class="col-thread"><small class="muted">{int(b.get('thread_count') or 0)} emails</small></td></tr>""")
+
+    tabs = "".join(
+        f"<a class='tab{' on' if view == k else ''}' href='/briefs?view={k}'>{lbl}</a>"
+        for k, lbl in (("upcoming", f"Upcoming ({counts['upcoming']})"), ("unset", f"Time not set ({counts['unset']})"),
+                       ("past", f"Past ({counts['past']})"), ("all", f"All ({len(rows)})")))
+    table = (f"""<div class="card"><table><thead><tr><th>Call</th><th>Company</th><th>Contact</th><th>Booked</th>
+<th>Brief</th><th class="col-thread">Thread</th></tr></thead><tbody id="rows">{''.join(trs)}</tbody></table></div>"""
+             if trs else "<div class='card empty'>Nothing here yet.</div>")
+    body = f"""<header class="top"><div><h1>Pre-Call Briefs</h1><div class="sub">Carrara Strategy · every booked call, its email thread and the brief</div></div>
+<div class="stats"><div class="stat"><b>{week}</b><span>calls next 7 days</span></div>
+<div class="stat"><b>{counts['upcoming']}</b><span>upcoming</span></div><div class="stat"><b>{len(rows)}</b><span>booked in total</span></div></div></header>
+<div class="bar"><div class="tabs">{tabs}</div><input class="search" id="q" placeholder="Search company, contact, state" autocomplete="off"></div>
+{table}
+<script>const q=document.getElementById('q');q&&q.addEventListener('input',()=>{{const v=q.value.trim().toLowerCase();
+document.querySelectorAll('#rows tr').forEach(r=>{{r.style.display=!v||r.dataset.s.includes(v)?'':'none'}})}});</script>"""
+    return page("Pre-Call Briefs · Carrara Strategy", body)
+
+
+@router.get("/briefs/{bid}", response_class=HTMLResponse)
+def brief_detail(request: Request, bid: str):
+    if not _viewer(request):
+        return locked()
+    b = store.get_booking(bid)
+    if not b:
+        raise HTTPException(status_code=404, detail="not found")
+    br = b.get("brief") or {}
+    req = br.get("request") or {}
+    a = br.get("assessment") or {}
+
+    day, hours = _fmt_call(b.get("meeting_at"))
+    if day:
+        src = b.get("meeting_source")
+        note = (f"From the email thread: “{e(b.get('meeting_quote') or b.get('meeting_text'))}”" if src == "thread"
+                else "Set by hand")
+        call = f"<div class='big'>{e(day)}</div><div>{e(hours)}</div><small class='muted'>{e(_rel(b.get('meeting_at')))} · {note}</small>"
+    else:
+        call = "<div class='big'>Time not set</div><small class='muted'>Not found in the email thread yet. Add it below.</small>"
+    d0 = _dt(b.get("meeting_at"))
+    d_ct = d0.astimezone(CT) if d0 else None
+    form = f"""<form method="post" action="/briefs/{e(bid)}/meeting">
+<input type="date" name="date" value="{d_ct.strftime('%Y-%m-%d') if d_ct else ''}" required>
+<input type="time" name="time" value="{d_ct.strftime('%H:%M') if d_ct else ''}" required>
+<select name="tz">{''.join(f"<option{' selected' if k == 'CT' else ''}>{k}</option>" for k in TZ_CHOICES)}</select>
+<button class="btn" type="submit">Save time</button></form>"""
+
+    chips = []
+    for label, val in (("", b.get("location") or req.get("location")), ("Founded ", req.get("founded_year")),
+                       ("", b.get("email"))):
+        if val:
+            chips.append(f"<span class='chip'>{e(label)}{e(val)}</span>")
+    site = b.get("website") or req.get("website")
+    if site:
+        url = site if site.startswith("http") else "https://" + site
+        chips.append(f"<a class='chip' href='{e(url)}' target='_blank' rel='noopener'>{e(site.replace('https://', '').replace('http://', '').strip('/'))} ↗</a>")
+
+    if br:
+        label, cls = OWNER_BADGE.get(br.get("owner_status") or "", ("Owner profile", "neutral"))
+        strengths = a.get("key_strengths") or []
+        secs = []
+        if a.get("marco_briefing_note"):
+            secs.append(f"<div class='sec'><h2>Walking in</h2>{_para(a['marco_briefing_note'])}</div>")
+        if req.get("business_summary"):
+            secs.append(f"<div class='sec'><h2>Business overview</h2>{_para(req['business_summary'])}</div>")
+        if req.get("owner_summary"):
+            secs.append(f"<div class='sec'><h2>Owner profile <span class='badge {cls}' style='margin-left:6px'>{e(label)}</span></h2>{_para(req['owner_summary'])}</div>")
+        if a.get("motivation_hypothesis"):
+            secs.append(f"<div class='sec'><h2>Why they might talk now</h2>{_para(a['motivation_hypothesis'])}</div>")
+        if strengths:
+            secs.append("<div class='sec'><h2>Deal strengths</h2><ul>" + "".join(f"<li>{e(s)}</li>" for s in strengths) + "</ul></div>")
+        news = req.get("recent_news")
+        if news and news.strip().rstrip(".").lower() not in ("no significant news found", "no news found", "none", "n/a"):
+            secs.append(f"<div class='sec'><h2>Recent developments</h2>{_para(news)}</div>")
+        pdf = (f"<a class='btn' href='/briefs/{e(bid)}/pdf'>Download PDF</a>" if _hooks["render_pdf"] else "")
+        posted = " · posted to Slack" if br.get("posted_to_slack") else ""
+        brief_html = f"""<div class="card"><div class="briefhead"><div><b>Pre-call brief</b><br>
+<small class="muted">Generated {e(_fmt_stamp(br.get('created_at')))}{posted}</small></div>{pdf}</div>{''.join(secs)}</div>"""
+    else:
+        brief_html = "<div class='card empty'>The brief for this booking has not been generated yet.</div>"
+
+    msgs = []
+    for m in b.get("thread") or []:
+        reply = m.get("type") == "REPLY"
+        who = "Prospect" if reply else "Carrara"
+        msgs.append(f"""<div class="msg{' reply' if reply else ''}"><div class="meta"><span><span class="who">{who}</span> · {e(m.get('from'))}</span>
+<span>{e(_fmt_stamp(m.get('time')))}</span></div>{('<div class="muted" style="font-size:13px;margin-bottom:4px">' + e(m.get('subject')) + '</div>') if m.get('subject') else ''}
+<div class="body">{e(m.get('text'))}</div></div>""")
+    thread_html = (f"<div class='card thread'><div class='briefhead'><b>Email thread</b><small class='muted'>{len(msgs)} emails</small></div>{''.join(msgs)}</div>"
+                   if msgs else "<div class='card empty'>No emails stored for this booking yet.</div>")
+
+    body = f"""<a class="back" href="/briefs">← All booked calls</a>
+<div class="card hero"><div><h1>{e(b.get('company') or '(company unknown)')}</h1>
+<div class="sub">{e(b.get('lead_name') or '')}{(' · ' + e(b.get('title'))) if b.get('title') else ''} · booked {e(_fmt_day(b.get('booked_at')))}</div>
+<div class="chips">{''.join(chips)}</div></div>
+<div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
+<div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
+    return page(f"{b.get('company') or 'Booking'} · Pre-Call Brief", body)
+
+
+@router.post("/briefs/{bid}/meeting")
+def set_meeting(request: Request, bid: str, date: str = Form(...), time: str = Form(...), tz: str = Form("CT")):
+    if not _viewer(request):
+        return locked()
+    b = store.get_booking(bid)
+    if not b:
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        local = datetime.fromisoformat(f"{date}T{time}")
+        at = local.replace(tzinfo=ZoneInfo(TZ_CHOICES.get(tz, "America/Chicago"))).astimezone(timezone.utc)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad date or time")
+    store.upsert_booking({"email": b["email"], "meeting": {
+        "at": at.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "text": f"{date} {time} {tz}",
+        "quote": None, "source": "manual"}})
+    return RedirectResponse(f"/briefs/{bid}", status_code=303)
+
+
+@router.get("/briefs/{bid}/pdf")
+def brief_pdf(request: Request, bid: str):
+    if not _viewer(request):
+        return locked()
+    b = store.get_booking(bid)
+    if not b or not b.get("brief") or not _hooks["render_pdf"]:
+        raise HTTPException(status_code=404, detail="no brief")
+    br = b["brief"]
+    pdf = _hooks["render_pdf"](br.get("request") or {}, br.get("assessment") or {}, br.get("owner_status") or "")
+    name = "".join(ch for ch in (b.get("company") or "brief") if ch.isalnum() or ch in " -_").strip().replace(" ", "_")
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="Pre-Call_Brief_{name}.pdf"'})
+
+
+# ---------------------------------------------------------------------------
+# Ingest (Gamic's sync and backfill)
+# ---------------------------------------------------------------------------
+
+def _maybe_extract(email: str):
+    fn = _hooks["extract_meeting"]
+    if not fn:
+        return
+    b = store.get_booking(store.bid_for(email))
+    if not b or b.get("meeting_source") == "manual" or not b.get("thread"):
+        return
+    m = fn(b["thread"], b.get("location"))
+    if m:
+        store.upsert_booking({"email": email, "meeting": m})
+
+
+def ingest_booking(d: dict, extract: bool = True) -> Optional[str]:
+    if isinstance(d.get("history"), list) and not isinstance(d.get("thread"), list):
+        d = {**d, "thread": normalize_thread(d["history"])}
+    before = store.get_booking(store.bid_for(d.get("email") or "")) if d.get("email") else None
+    bid = store.upsert_booking(d)
+    after = store.get_booking(bid) if bid else None
+    if extract and after and after.get("thread") and (
+            not before or before.get("thread_hash") != after.get("thread_hash") or not after.get("meeting_at")):
+        threading.Thread(target=_maybe_extract, args=(after["email"],), daemon=True).start()
+    return bid
+
+
+@router.post("/api/briefs/ingest")
+async def api_ingest(request: Request):
+    _ingest(request)
+    data = await request.json()
+    out = {"bookings": 0, "briefs": 0}
+    if isinstance(data.get("campaigns"), list):
+        out["campaigns"] = store.set_campaigns(data["campaigns"])
+    for d in data.get("bookings") or []:
+        if ingest_booking(d, extract=bool(data.get("extract", True))):
+            out["bookings"] += 1
+    for br in data.get("briefs") or []:
+        store.save_brief(br.get("email"), br.get("company"), br.get("lead_name"), br.get("source") or "import",
+                         br.get("owner_status"), br.get("request") or {}, br.get("assessment") or {},
+                         bool(br.get("posted")), br.get("created_at"))
+        out["briefs"] += 1
+    return out
+
+
+@router.get("/api/briefs/state")
+def api_state(request: Request):
+    _ingest(request)
+    return {"bookings": store.state()}

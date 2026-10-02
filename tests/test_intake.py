@@ -5,6 +5,7 @@ Run: python -m pytest tests/test_intake.py  (or python tests/test_intake.py)
 import json
 import os
 import sys
+import time
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -113,7 +114,7 @@ def test_endpoints_with_stubs():
     from fastapi.testclient import TestClient
 
     calls = {"run": [], "fwd": []}
-    main._run_brief_logged = lambda req, notes: calls["run"].append((req.lead_name, req.company_name, req.founded_year))
+    main._run_brief_logged = lambda req, notes, **kw: (calls["run"].append((req.lead_name, req.company_name, req.founded_year)), time.sleep(0.3), main.release(req.email))
     main.forward_to_clay = lambda to, payload: calls["fwd"].append((to, payload.get("event_id")))
     c = TestClient(main.app)
 
@@ -122,10 +123,11 @@ def test_endpoints_with_stubs():
     r = c.post("/generate-briefing", json=body)
     assert r.status_code == 200 and r.json()["status"] == "queued", r.text
     r2 = c.post("/generate-briefing", json=body)
-    assert r2.json()["status"] == "duplicate_skipped"
+    assert r2.json()["status"] == "duplicate_skipped"   # first build still running
+    time.sleep(0.5)
     r3 = c.post("/generate-briefing?force=true", json=body)
     assert r3.json()["status"] == "queued"
-    import time; time.sleep(0.2)
+    time.sleep(0.5)
     assert calls["run"][0] == ("Adam", "Imex", "1987")
 
     target = "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-df38f22f-fd6a-47ba-a8de-058e7af56462"
