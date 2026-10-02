@@ -218,7 +218,7 @@ def test_booked_brief_posts_short_notice_with_link():
                                              "ownership": "acquired from Natus Medical in 2023",
                                              "recent_developments": ["Jan 2023: acquired from Natus Medical"]}
     main.resolve_owner_profile = lambda client, req: ("• Adam is President.", "verified_research", "test")
-    main.generate_assessment = lambda req, status, words=None, facts=None: {
+    main.generate_assessment = lambda req, status, words=None, facts=None, camp=None: {
         "walking_in": ["Igol, Adam's partner, runs the emails; ask him to join."],
         "they_said": ["Igol (partner): we certainly do not need to sell"],
         "confirm_on_call": ["Who owns what share of Imex?"], "why_now": ["Testing the waters on value."],

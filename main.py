@@ -129,8 +129,21 @@ def years_operating(founded_year) -> Optional[int]:
 # Claude assessment
 # ---------------------------------------------------------------------------
 
+def campaign_note(campaign_name: Optional[str]) -> Optional[str]:
+    """What this client told us about the campaign a call came from (a buy-side mandate's buyer and criteria, or
+    general sell-side). Tenant config campaign_notes: [{"match": regex on campaign name, "note": text}], first match."""
+    for rule in tenant.get("campaign_notes") or []:
+        try:
+            if re.search(rule.get("match") or "(?!)", campaign_name or "", re.I):
+                return rule.get("note")
+        except re.error:
+            continue
+    return None
+
+
 def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upstream",
-                        thread_text: Optional[str] = None, research_facts: Optional[list] = None) -> dict:
+                        thread_text: Optional[str] = None, research_facts: Optional[list] = None,
+                        campaign_text: Optional[str] = None) -> dict:
     parts = []
     if req.business_summary:
         parts.append(f"BUSINESS OVERVIEW:\n{req.business_summary}")
@@ -159,8 +172,9 @@ def generate_assessment(req: BriefingRequest, owner_status: str = "verified_upst
 
     caller, ctx = tenant.get("caller"), tenant.get("caller_context")
     extra = tenant.get("brief_notes") or ""
+    camp = f"\nTHE CAMPAIGN THIS CALL CAME FROM:\n{campaign_text}\n" if campaign_text else ""
     prompt = f"""You are preparing a pre-call brief for {caller}, {ctx}. {caller} reads it minutes before the call, often on a phone, so every point must be short and scannable.
-{extra}
+{extra}{camp}
 {caller} is about to speak with {who} at {co}. Here is everything we know:
 
 {context}
@@ -707,12 +721,12 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
               source: str = "clay", post: bool = True, store_brief: Optional[bool] = None,
               booked_now: bool = False, extra_words: Optional[str] = None) -> dict:
     apply_lead_record(req, smartlead_lead(req.email, SMARTLEAD_API_KEY), notes)
-    if req.email and (thread is None or extra_words is None):
-        b = store.get_booking(store.bid_for(req.email)) or {}
-        if thread is None:
-            thread = b.get("thread") or []
-        if extra_words is None:
-            extra_words = b.get("form_answers")
+    b = (store.get_booking(store.bid_for(req.email)) or {}) if req.email else {}
+    if thread is None:
+        thread = b.get("thread") or []
+    if extra_words is None:
+        extra_words = b.get("form_answers")
+    cnote = campaign_note(b.get("campaign_name"))
     if not req.business_summary and req.website:
         overview = overview_from_site(claude_client, OVERVIEW_MODEL, req.company_name, domain_of(req.website))
         if overview:
@@ -742,7 +756,7 @@ def run_brief(req: BriefingRequest, notes: list, dry_run: bool = False, thread: 
     words = prospect_words(thread or [])
     if extra_words:
         words = (words + "\n\n" if words else "") + "Their answers on the booking form:\n" + extra_words
-    assessment   = generate_assessment(req, owner_status, words or None, research.get("facts"))
+    assessment   = generate_assessment(req, owner_status, words or None, research.get("facts"), cnote)
     html_content = build_pdf_html(req, assessment, owner_status)
     pdf_bytes    = WeasyHTML(string=html_content).write_pdf()
     if store_brief is None:

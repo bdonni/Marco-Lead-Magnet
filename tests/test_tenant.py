@@ -29,6 +29,7 @@ if "weasyprint" not in sys.modules:
     sys.modules["weasyprint"] = stub
 
 import main  # noqa: E402
+REAL_GENERATE = main.generate_assessment
 import store  # noqa: E402
 import tenant  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -110,7 +111,7 @@ def test_new_client_never_posts_to_slack_until_switched_on():
     main.overview_from_site = lambda *a, **k: "Overview."
     main.company_research = lambda *a, **k: {}
     main.resolve_owner_profile = lambda client, req: ("• Owner.", "verified_research", "t")
-    main.generate_assessment = lambda req, status, words=None, facts=None: {"walking_in": ["x"], "key_strengths": []}
+    main.generate_assessment = lambda req, status, words=None, facts=None, camp=None: {"walking_in": ["x"], "key_strengths": []}
     req = main.BriefingRequest(lead_name="Rod Smith", email="rod@airproelite.com", company_name="Air Pro Elite")
     out = main.run_brief(req, [], source="smartlead-booked", store_brief=True)
     assert out["status"] == "success" and sent == []
@@ -245,6 +246,24 @@ def test_calendar_only_calls_from_an_outlook_feed():
     store.set_setting("tenant_config", json.dumps({"firm": "X"}))
     assert calendar_sync.parse_title("Finest/ABC catch up", ["ABC"]) == (None, "Finest")
     assert calendar_sync.parse_title("Danny Munro and Caleb Lyons", ["ABC"], "Caleb") == ("Danny Munro", None)
+
+
+def test_campaign_note_reaches_the_brief_prompt():
+    store.set_setting("tenant_config", json.dumps({"firm": "The Vant Group", "caller": "Michael", "campaign_notes": [
+        {"match": "Trovaya|Food CPG", "note": "Buy-side for Chirag: EBITDA $1M+."},
+        {"match": ".*", "note": "General sell-side."}]}))
+    assert main.campaign_note("Vant - BuySide Food CPG (Trovaya) v1") == "Buy-side for Chirag: EBITDA $1M+."
+    assert main.campaign_note("Vant - Buyer Interest 3-Step (V1 winner)") == "General sell-side."
+    seen = {}
+
+    class Msg:
+        content = [types.SimpleNamespace(type="text", text=json.dumps({"walking_in": ["x"]}))]
+    main.claude_client.messages.create = lambda **kw: (seen.update(kw), Msg())[1]
+    req = main.BriefingRequest(lead_name="Cathy Bacon", company_name="Freedom Foods")
+    REAL_GENERATE(req, "verified_research", "Happy to talk.", [], "Buy-side for Chirag: EBITDA $1M+.")
+    prompt = json.dumps(seen.get("messages"))
+    assert "THE CAMPAIGN THIS CALL CAME FROM" in prompt and "Buy-side for Chirag" in prompt
+    store.set_setting("tenant_config", json.dumps({"firm": "X"}))
 
 
 if __name__ == "__main__":
