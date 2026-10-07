@@ -36,9 +36,21 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 H = {"x-ingest-key": INGEST_KEY}
 STATS = {"program": {"since": "2026-09-10", "owners_emailed": 4321, "positives": 35},
-         "days": [{"day": "2026-10-02", "e1": 100, "followups": 900, "positives": 2},   # last week: not counted
+         "days": [{"day": "2026-09-29", "e1": 300, "followups": 700, "positives": 3},   # last week
+                  {"day": "2026-10-02", "e1": 100, "followups": 900, "positives": 2},   # last week
                   {"day": "2026-10-05", "e1": 150, "followups": 1000, "positives": 0},
-                  {"day": "2026-10-07", "e1": 1200, "followups": 50, "positives": 9}]}
+                  {"day": "2026-10-07", "e1": 1200, "followups": 50, "positives": 9}],
+         "positives_recent": [{"company": "Older Co", "day": "2026-10-01"}, {"company": "Example Fab", "day": "2026-10-07"},
+                              {"company": "Sample Mills", "day": "2026-10-07"}],
+         "campaigns": [{"area": "Manufacturing", "wave": "Wave 3", "segment": "Google Workspace", "state": "sending",
+                        "first_send": "2026-10-07", "queued": 400, "e1_days": {"2026-10-07": 800},
+                        "emails_days": {"2026-10-07": 800}},
+                       {"area": "Manufacturing", "wave": "Wave 2", "segment": "Microsoft 365", "state": "sending",
+                        "first_send": "2026-09-28", "queued": 1700, "e1_days": {"2026-10-05": 150, "2026-10-07": 400},
+                        "emails_days": {"2026-10-05": 1150, "2026-10-07": 450, "2026-10-02": 99}},
+                       {"area": "Manufacturing", "wave": "Wave 4", "segment": "Microsoft 365 + other", "state": "starting",
+                        "starts": "2026-10-12", "queued": 3500}],
+         "inboxes": {"joining": {"count": 60, "date": "2026-10-12"}}}
 
 
 def run():
@@ -51,12 +63,20 @@ def run():
 
     s = weekly.build(now=datetime(2026, 10, 9, 22, 0, tzinfo=timezone.utc), link="https://example.test/campaigns?key=k")
     assert s["week"] == "2026-10-05", s["week"]
-    assert (s["emails"], s["first_emails"], s["positives"], s["booked"]) == (2400, 1350, 9, 1), s
-    for want in ("weekly summary", "Week of 5 October", "*Emails sent:* 2,400", "1,350 owners emailed for the first time",
-                 "*Positive replies:* 9", "*Calls booked:* 1", "Since 10 September: 35 positive replies from 4,321",
-                 "<https://example.test/campaigns?key=k|open your dashboard>"):
+    assert (s["emails"], s["first_emails"], s["positives"], s["positives_last_week"], s["booked"]) == (2400, 1350, 9, 5, 1), s
+    for want in ("here's how your week went", "Big week", "9 owners asked to talk, up from 5 last week", "1 call was booked for you",
+                 "Wednesday was the standout, with 9 positive replies in one day, the day Wave 3 went out for the first time",
+                 "*This week in numbers*", "2,400 emails sent, 1,350 of them first emails", "9 positive replies", "1 call booked",
+                 "*Who said yes*", "Example Fab and Sample Mills", "*Calls booked this week*", "Example Fab",
+                 "*What went out*", "Wave 3 · Google Workspace: 800 first emails", "Wave 2 · Microsoft 365: 550 first emails, 1,050 follow-ups",
+                 "*Next week*", "Mon 12 Oct: 60 new inboxes go live", "Mon 12 Oct: Wave 4 · Microsoft 365 + other starts for 3,500 owners",
+                 "Wave 2 · Microsoft 365: 1,700 owners still to get a first email",
+                 "Since 10 September: 35 positive replies from 4,321", "<https://example.test/campaigns?key=k|open your dashboard>",
+                 "Have a great weekend", "Ben and the Gamic team"):
         assert want in s["text"], want
-    assert "—" not in s["text"]
+    assert "Older Co" not in s["text"] and "Example Mill" not in s["text"]
+    assert "\u2014" not in s["text"]
+    assert all(len(b["text"]["text"]) <= 3000 for b in s["payload"]["blocks"])
 
     # the endpoint is a dry run unless told otherwise, and never posts without a Slack destination
     r = c.post("/api/briefs/weekly-summary", json={"link": "https://example.test/x"}, headers=H).json()
