@@ -64,7 +64,7 @@ def run():
     s = weekly.build(now=datetime(2026, 10, 9, 22, 0, tzinfo=timezone.utc), link="https://example.test/campaigns?key=k")
     assert s["week"] == "2026-10-05", s["week"]
     assert (s["emails"], s["first_emails"], s["positives"], s["positives_last_week"], s["booked"]) == (2400, 1350, 9, 5, 1), s
-    for want in ("here's how your week went", "Big week", "9 owners asked to talk, up from 5 last week", "1 call was booked for you",
+    for want in ("here's how your week went", "Big week", "9 owners asked to talk, up from 5 last week and 1 call was booked for you.",
                  "Wednesday was the standout, with 9 positive replies in one day, the day Wave 3 went out for the first time",
                  "*This week in numbers*", "2,400 emails sent, 1,350 of them first emails", "9 positive replies", "1 call booked",
                  "*Who said yes*", "Example Fab and Sample Mills", "*Calls booked this week*", "Example Fab",

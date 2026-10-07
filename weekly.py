@@ -89,7 +89,9 @@ def build(now: Optional[datetime] = None, link: Optional[str] = None) -> dict:
         intro = f"Big week, {caller}. {_plural(positives, 'owner', 'owners')} asked to talk, up from {_n(pos_last)} last week."
     else:
         intro = f"Good week, {caller}. {_plural(positives, 'owner', 'owners')} asked to talk."
-    if booked:
+    if booked and positives:
+        intro = intro[:-1] + f" and {_plural(len(booked), 'call was', 'calls were')} booked for you."
+    elif booked:
         intro += f" {_plural(len(booked), 'call was', 'calls were')} booked for you."
     if best and int(best.get("positives") or 0) >= 3:
         lead = f" {wd(best['day'])} was the standout, with {_n(best['positives'])} positive replies in one day"
