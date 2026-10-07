@@ -20,6 +20,7 @@ import store
 import tenant
 import dashboard
 import campaigns_view
+import weekly
 import calendar_sync
 import calendly
 from identity import resolve_owner_profile
@@ -1089,3 +1090,4 @@ dashboard.configure(render_pdf=_render_pdf,
                     build_brief=_queue_brief)
 app.include_router(dashboard.router)
 app.include_router(campaigns_view.router)
+app.include_router(weekly.router)
