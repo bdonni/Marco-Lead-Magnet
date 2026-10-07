@@ -19,6 +19,7 @@ from weasyprint import HTML as WeasyHTML
 import store
 import tenant
 import dashboard
+import campaigns_view
 import calendar_sync
 import calendly
 from identity import resolve_owner_profile
@@ -1087,3 +1088,4 @@ dashboard.configure(render_pdf=_render_pdf,
                     extract_meeting=lambda thread, state: extract_meeting(claude_client, MEETING_MODEL, thread, state),
                     build_brief=_queue_brief)
 app.include_router(dashboard.router)
+app.include_router(campaigns_view.router)

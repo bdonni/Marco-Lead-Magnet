@@ -249,6 +249,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute
 .logo-tile img{height:58px;width:auto;display:block}
 .brandbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
 .brandbar .logo-tile img{height:40px}.brandbar .back{margin:0}
+.sitenav{display:flex;justify-content:flex-end;gap:6px;margin-bottom:12px}
 @media (max-width:860px){.cols{grid-template-columns:1fr}}
 @media (max-width:700px){.wrap{padding:18px 16px 40px}thead{display:none}table,tbody,tr,td{display:block;width:100%}
 tbody tr{padding:12px 14px;border-bottom:1px solid var(--line)}td{border:0;padding:3px 0}
@@ -274,15 +275,25 @@ def _logo_tile() -> str:
     return f'<span class="logo-tile"><img src="/static/logo.png" alt="{e(tenant.get("firm"))}" height="58"></span>'
 
 
-def page(title: str, body: str) -> HTMLResponse:
-    doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+def nav(active: str) -> str:
+    """Site tabs. The Campaigns tab shows once Gamic's sync has sent campaign numbers for this client."""
+    if not store.get_setting("campaign_stats"):
+        return ""
+    tabs = (("briefs", "/briefs", "Booked calls"), ("campaigns", "/campaigns", "Campaigns"))
+    return '<nav class="sitenav">' + "".join(
+        f"<a class='tab{' on' if k == active else ''}' href='{href}'>{lbl}</a>" for k, href, lbl in tabs) + "</nav>"
+
+
+def page(title: str, body: str, refresh: int = 0, foot: Optional[str] = None) -> HTMLResponse:
+    meta = f'<meta http-equiv="refresh" content="{int(refresh)}">' if refresh else ""
+    doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta}
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
 <link rel="icon" type="image/png" href="/static/logo.png">
 <title>{e(title)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>{CSS.replace("--accent:#144e83;", f"--accent:{tenant.get('accent')};").replace("--accent:#8fb3e0;", f"--accent:{tenant.get('accent_dark')};")}</style></head><body><div class="wrap">{body}
-<div class="foot">Prepared for {e(tenant.get('firm'))} by Gamic · {e(_calendar_status())}</div></div></body></html>"""
+<div class="foot">{e(foot if foot is not None else f"Prepared for {tenant.get('firm')} by Gamic · {_calendar_status()}")}</div></div></body></html>"""
     return HTMLResponse(doc, headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"})
 
 
@@ -351,7 +362,7 @@ def briefs_index(request: Request, key: Optional[str] = None, view: Optional[str
     table = (f"""<div class="card"><table><thead><tr><th>Call</th><th>Company</th><th>Contact</th><th>Booked</th>
 <th>Brief</th><th class="col-thread">Thread</th></tr></thead><tbody id="rows">{''.join(trs)}</tbody></table></div>"""
              if trs else "<div class='card empty'>Nothing here yet.</div>")
-    body = f"""<header class="top"><div class="brand">{_logo_tile()}<div><h1>Pre-Call Briefs</h1><div class="sub">{e(tenant.get('firm'))} · every booked call, its email thread and the brief</div></div></div>
+    body = f"""{nav("briefs")}<header class="top"><div class="brand">{_logo_tile()}<div><h1>Pre-Call Briefs</h1><div class="sub">{e(tenant.get('firm'))} · every booked call, its email thread and the brief</div></div></div>
 <div class="stats"><div class="stat"><b>{week}</b><span>calls next 7 days</span></div>
 <div class="stat"><b>{counts['upcoming']}</b><span>upcoming</span></div><div class="stat"><b>{len(rows)}</b><span>booked in total</span></div></div></header>
 <div class="bar"><div class="tabs">{tabs}</div><input class="search" id="q" placeholder="Search company, contact, state" autocomplete="off"></div>
@@ -655,7 +666,7 @@ async def api_ingest(request: Request):
     if isinstance(data.get("settings"), dict):
         for k, v in data["settings"].items():
             if k in ("calendar_ics_url", "tenant_config", "tenant_logo_b64", "view_key_sha256", "slack_webhook_url",
-                     "slack_channel_id", "tenant_routes", "calendly_signing_key"):
+                     "slack_channel_id", "tenant_routes", "calendly_signing_key", "campaign_stats"):
                 store.set_setting(k, (json.dumps(v) if isinstance(v, (dict, list)) else v) or None)
                 out.setdefault("settings", []).append(k)
     if data.get("calendar_sync"):
