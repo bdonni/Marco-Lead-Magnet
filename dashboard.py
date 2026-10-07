@@ -279,7 +279,7 @@ def nav(active: str) -> str:
     """Site tabs. The Campaigns tab shows once Gamic's sync has sent campaign numbers for this client."""
     if not store.get_setting("campaign_stats"):
         return ""
-    tabs = (("briefs", "/briefs", "Booked calls"), ("campaigns", "/campaigns", "Campaigns"))
+    tabs = (("briefs", "/briefs", "Booked calls"), ("campaigns", "/campaigns", "Campaigns"), ("weekly", "/weekly", "Weekly review"))
     return '<nav class="sitenav">' + "".join(
         f"<a class='tab{' on' if k == active else ''}' href='{href}'>{lbl}</a>" for k, href, lbl in tabs) + "</nav>"
 
