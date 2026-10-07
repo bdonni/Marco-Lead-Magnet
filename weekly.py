@@ -259,7 +259,12 @@ PAGE_CSS = """
 .mini span{display:block;height:100%}.mini .a{background:var(--accent)}.mini .b{background:var(--accent);opacity:.32}
 .when-chip{display:inline-block;min-width:96px;font-size:12.5px;font-weight:700;color:var(--accent);background:var(--chip);
 padding:4px 10px;border-radius:999px;text-align:center;flex:none}
-@media (max-width:900px){.two{grid-template-columns:1fr}.mini{width:100px}}
+.yesgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+.yesgrid div{padding:12px 18px;border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
+.yesgrid div:nth-child(3n){border-right:0}.yesgrid b{display:block;font-weight:600}.yesgrid small{color:var(--muted)}
+@media (max-width:900px){.two{grid-template-columns:1fr}.mini{width:100px}.yesgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.yesgrid div:nth-child(3n){border-right:1px solid var(--line)}.yesgrid div:nth-child(2n){border-right:0}}
+@media (max-width:560px){.yesgrid{grid-template-columns:1fr}.yesgrid div{border-right:0!important}}
 """
 
 
@@ -270,9 +275,8 @@ def _render(r: dict, weeks: list, live: bool) -> str:
             f'<div class="kpi"><div class="num">{_n(len(r["booked"]))}</div><div class="lbl">Calls booked</div><div class="hint">on your calendar this week</div></div>'
             f'<div class="kpi"><div class="num">{_n(r["emails"])}</div><div class="lbl">Emails sent</div><div class="hint">first emails and follow-ups</div></div>'
             f'<div class="kpi"><div class="num">{_n(r["first_emails"])}</div><div class="lbl">New owners reached</div><div class="hint">first email this week</div></div></div>')
-    yes = "".join(f'<li><div><div class="who">{e(p["company"])}</div><small>{e(p.get("first_name") or "")}'
-                  f'{" · " if p.get("first_name") else ""}{e(p.get("campaign") or "")}</small></div>'
-                  f'<div class="r"><small>{e(_short(p["day"]))}</small></div></li>' for p in r["said_yes"]) or "<li><small>None yet this week.</small></li>"
+    yes = "".join(f'<div><b>{e(p["company"])}</b><small>{e(p.get("first_name") or "")}{" · " if p.get("first_name") else ""}'
+                  f'{e(_short(p["day"]))}</small></div>' for p in r["said_yes"])
     call_rows = []
     for b in r["booked"]:
         name = f"<a href='/briefs/{e(b['bid'])}'>{e(b['company'])}</a>" if b.get("bid") else e(b["company"])
@@ -298,15 +302,15 @@ def _render(r: dict, weeks: list, live: bool) -> str:
         f'<div class="notecard"><p>{e(r["note"])}</p><div class="sig">Ben and the Gamic team · {status}</div></div>',
         kpis,
         '<div class="sect"><h2>Day by day</h2></div>', _chart(r["days"]),
-        '<div class="two"><div><div class="sect"><h2>Who said yes</h2>'
-        f'<small>{_plural(len(r["said_yes"]), "owner", "owners")}</small></div><div class="card"><ul class="rows">{yes}</ul></div></div>'
-        '<div><div class="sect"><h2>Calls booked</h2>'
-        f'<small>{_plural(len(r["booked"]), "call", "calls")}</small></div><div class="card"><ul class="rows">{calls}</ul></div></div></div>',
+        '<div class="two"><div><div class="sect"><h2>Calls booked</h2>'
+        f'<small>{_plural(len(r["booked"]), "call", "calls")}</small></div><div class="card"><ul class="rows">{calls}</ul></div></div>'
+        '<div><div class="sect"><h2>Next week</h2></div>'
+        f'<div class="card"><ul class="rows">{nxt or "<li><small>Nothing new scheduled yet.</small></li>"}</ul></div></div></div>',
+        f'<div class="sect"><h2>Who said yes</h2><small>{_plural(len(r["said_yes"]), "owner", "owners")}</small></div>'
+        + (f'<div class="card yesgrid">{yes}</div>' if yes else '<div class="card empty">None yet this week.</div>'),
     ]
     if went:
         parts.append(f'<div class="sect"><h2>What went out</h2></div><div class="card"><ul class="rows">{went}</ul></div>')
-    if nxt:
-        parts.append(f'<div class="sect"><h2>Next week</h2></div><div class="card"><ul class="rows">{nxt}</ul></div>')
     return f"<style>{CAMPAIGN_CSS}{PAGE_CSS}</style>" + "".join(parts)
 
 
