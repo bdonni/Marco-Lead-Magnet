@@ -298,9 +298,10 @@ def page(title: str, body: str, refresh: int = 0, foot: Optional[str] = None) ->
 
 
 def locked() -> HTMLResponse:
-    body = """<div class="card empty" style="margin-top:80px">""" + _logo_tile() + """<h1 style="font-size:20px;margin:14px 0 6px">Pre-Call Briefs</h1>
+    title = f"{tenant.get('firm_short')} dashboard" if store.get_setting("campaign_stats") else "Pre-Call Briefs"
+    body = f"""<div class="card empty" style="margin-top:80px">{_logo_tile()}<h1 style="font-size:20px;margin:14px 0 6px">{e(title)}</h1>
 <p>This page needs your private access link. Ask Gamic to resend it.</p></div>"""
-    r = page("Pre-Call Briefs", body)
+    r = page(title, body, foot=f"Prepared for {tenant.get('firm')} by Gamic")
     r.status_code = 401
     return r
 
