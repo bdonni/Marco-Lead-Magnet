@@ -1085,6 +1085,23 @@ def _queue_brief(email: str):
 
 
 calendar_sync.on_new_call = _queue_brief
+
+
+def _catch_up_briefs(delay: int = 30):
+    """A restart (deploy) kills a brief that was mid-build. Shortly after start, rebuild the brief for any booking
+    from the last 12 hours that still has none; _brief_from_booking posts only for upcoming calls."""
+    time.sleep(delay)
+    cutoff = (datetime.now(timezone.utc).timestamp() - 12 * 3600)
+    for b in store.list_bookings():
+        at = dashboard._dt(b.get("booked_at"))
+        if at and at.timestamp() >= cutoff and not b.get("brief") and b.get("email") and store.needs_brief(b["email"]) \
+                and not calendar_sync.is_placeholder(b.get("email")):
+            print(json.dumps({"event": "brief_catch_up", "company": b.get("company")}), flush=True)
+            _brief_from_booking(b["email"])
+
+
+if os.environ.get("DISABLE_CALENDAR_SYNC") != "1":
+    threading.Thread(target=_catch_up_briefs, daemon=True).start()
 dashboard.configure(render_pdf=_render_pdf,
                     extract_meeting=lambda thread, state: extract_meeting(claude_client, MEETING_MODEL, thread, state),
                     build_brief=_queue_brief)
