@@ -181,7 +181,9 @@ def slack_payload(r: dict, link: str) -> dict:
 
 
 def _post(payload: dict) -> dict:
-    hook = store.get_setting("slack_webhook_url") or os.environ.get("SLACK_WEBHOOK_URL", "")
+    # a client with its own weekly channel (weekly_slack_webhook_url) gets the review there, not with the call notes
+    hook = (store.get_setting("weekly_slack_webhook_url") or store.get_setting("slack_webhook_url")
+            or os.environ.get("SLACK_WEBHOOK_URL", ""))
     channel = store.get_setting("slack_channel_id") or os.environ.get("SLACK_CHANNEL_ID", "")
     token = os.environ.get("SLACK_BOT_TOKEN", "")
     if hook:
