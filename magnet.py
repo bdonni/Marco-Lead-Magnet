@@ -61,19 +61,26 @@ def money(v: float) -> str:
     return f"${v / 1e6:.1f}M" if v >= 1e6 else f"${v / 1e3:,.0f}k"
 
 
-def _claude_json(prompt: str, uses: int = 8) -> dict:
+def _claude_json(prompt: str, uses: int = 8, deadline: int = 720) -> dict:
+    """Research with web search; gives up after `deadline` seconds in total so a build can never hang."""
     messages = [{"role": "user", "content": prompt}]
-    resp = None
-    for _ in range(4):  # resume pause_turn
-        resp = _client.messages.create(model=MODEL, max_tokens=6000, messages=messages, timeout=600,
+    resp, t0, turns = None, time.time(), 0
+    while True:
+        left = deadline - (time.time() - t0)
+        if left < 30:
+            raise ValueError(f"research ran past {deadline}s after {turns} turns")
+        resp = _client.messages.create(model=MODEL, max_tokens=4000, messages=messages, timeout=left,
                                        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": uses}])
-        if resp.stop_reason != "pause_turn":
+        turns += 1
+        print(json.dumps({"event": "magnet_research_turn", "turn": turns, "stop": resp.stop_reason,
+                          "secs": round(time.time() - t0)}), flush=True)
+        if resp.stop_reason != "pause_turn" or turns >= 4:
             break
         messages = [{"role": "user", "content": prompt}, {"role": "assistant", "content": resp.content}]
     text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
-        raise ValueError("no JSON from research")
+        raise ValueError(f"no JSON from research (stop={resp.stop_reason}, turns={turns})")
     return json.loads(m.group(0))
 
 
@@ -137,7 +144,7 @@ large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and tr
 boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
 competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead. When a figure comes from GF Data,
 cite GF Data, not the advisor who reposted it."""
-        j = _claude_json(p, uses=6)
+        j = _claude_json(p, uses=4)
         sl, sh = float(j["sales_per_employee_low"]), float(j["sales_per_employee_high"])
         ml, mh = float(j["ebitda_margin_low"]), float(j["ebitda_margin_high"])
         xl, xh = float(j["multiple_low"]), float(j["multiple_high"])
