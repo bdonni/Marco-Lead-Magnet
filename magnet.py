@@ -44,6 +44,8 @@ def init(client) -> None:
                      html TEXT, data TEXT, created_at TEXT)""")
         if "status" not in [r[1] for r in c.execute("PRAGMA table_info(magnets)")]:
             c.execute("ALTER TABLE magnets ADD COLUMN status TEXT DEFAULT 'ready'")
+        # a restart kills the build threads, so anything still "building" at startup will never finish
+        c.execute("""UPDATE magnets SET status='failed', data='{"error": "interrupted by a restart"}' WHERE status='building'""")
 
 
 def _ingest(request: Request) -> None:
@@ -63,7 +65,7 @@ def _claude_json(prompt: str, uses: int = 8) -> dict:
     messages = [{"role": "user", "content": prompt}]
     resp = None
     for _ in range(4):  # resume pause_turn
-        resp = _client.messages.create(model=MODEL, max_tokens=6000, messages=messages,
+        resp = _client.messages.create(model=MODEL, max_tokens=6000, messages=messages, timeout=240,
                                        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": uses}])
         if resp.stop_reason != "pause_turn":
             break
@@ -99,7 +101,7 @@ def _tighten(lo: float, hi: float, ratio: float) -> tuple:
     return mid / ratio ** 0.5, mid * ratio ** 0.5
 
 
-BANNED_SOURCES = re.compile(r"ct acquisitions|dealstream|bizbuysell|iconic|business broker|sunbelt|transworld|axial", re.I)
+BANNED_SOURCES = re.compile(r"ct acquisitions|dealstream|bizbuysell|iconic|business broker|sunbelt|transworld|axial|true north|axia growth", re.I)
 
 
 def size_band(staff: int) -> str:
@@ -133,8 +135,9 @@ companies. Each *_basis sentence under 30 words. No em dashes.
 Source rules: prefer industry associations, government data (Census, BLS), deal-data providers (GF Data, PitchBook, Capital IQ),
 large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and trade press. Never cite a business broker, a
 boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
-competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead."""
-        j = _claude_json(p)
+competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead. When a figure comes from GF Data,
+cite GF Data, not the advisor who reposted it."""
+        j = _claude_json(p, uses=6)
         sl, sh = float(j["sales_per_employee_low"]), float(j["sales_per_employee_high"])
         ml, mh = float(j["ebitda_margin_low"]), float(j["ebitda_margin_high"])
         xl, xh = float(j["multiple_low"]), float(j["multiple_high"])
@@ -172,7 +175,7 @@ def valuation_html(lead: dict, b: dict) -> tuple:
 <h1>What {co} might be worth today</h1>
 <p class="meta">A first look from public information only · {month}</p>
 <div class="hl"><p>ROUGH ENTERPRISE VALUE RANGE</p><p class="big">{money(vl)} to {money(vh)}</p><p>Central estimate around {money(vc)}</p></div>
-<p class="src">Built from headcount, typical margins for {esc(b.get('sector_label') or lead.get('sector'))} and recent deal multiples. Your own numbers will narrow this range considerably.</p>
+<p class="src">Built from headcount, typical margins for {esc(lead.get('sector') or (b.get('sector_label') or '').lower())} and recent deal multiples. Your own numbers will narrow this range considerably.</p>
 </div>
 <section><p class="kicker">SECTION 01</p><h2>How we got there</h2>
 <p class="lead">Three steps, each from public data. Where we had to estimate, we used a range rather than a single number.</p>
@@ -214,7 +217,8 @@ Plain English, no hype, no em dashes. If you cannot find real deals, return an e
 Source rules: prefer industry associations, government data (Census, BLS), deal-data providers (GF Data, PitchBook, Capital IQ),
 large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and trade press. Never cite a business broker, a
 boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
-competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead."""
+competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead. When a figure comes from GF Data,
+cite GF Data, not the advisor who reposted it."""
         j = _claude_json(p, uses=10)
         if not j.get("short_version") or not j.get("sources"):
             raise ValueError("sector report research came back empty")
@@ -224,7 +228,7 @@ competitors of the firm sending this. If a figure is only on such a page, find t
 
 
 def report_html(lead: dict, r: dict) -> str:
-    label = esc(r.get("sector_label") or lead.get("sector"))
+    label = esc(lead.get("sector") or (r.get("sector_label") or "").lower())
     who = esc(f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip().upper())
     month = datetime.now(timezone.utc).strftime("%B %Y")
     short = "".join(f"<li>{esc(_clean(x))}</li>" for x in r.get("short_version", [])[:5])
