@@ -91,6 +91,17 @@ def _clean(s) -> str:
     return re.sub(r"\s*[—–]\s*", " - ", str(s or "")).strip()
 
 
+def _tighten(lo: float, hi: float, ratio: float) -> tuple:
+    """Shrink a range around its geometric middle so high/low is at most `ratio`."""
+    if lo <= 0 or hi / lo <= ratio:
+        return lo, hi
+    mid = (lo * hi) ** 0.5
+    return mid / ratio ** 0.5, mid * ratio ** 0.5
+
+
+BANNED_SOURCES = re.compile(r"ct acquisitions|dealstream|bizbuysell|iconic|business broker|sunbelt|transworld|axial", re.I)
+
+
 def size_band(staff: int) -> str:
     return "100 to 199 staff" if staff < 200 else "200 to 499 staff" if staff < 500 else "500 to 1,000 staff"
 
@@ -116,16 +127,27 @@ Return ONLY JSON:
  "buyer_stats": [{{"figure": "short figure like 85% or 7.2x", "label": "what it means, under 18 words"}}] (3 items, each from a source),
  "buyer_source": "short source line for the buyer stats",
  "sources": ["Publisher, Title (Year)" for every source used]}}
-Ranges should be honest and fairly wide. Multiples must suit a company of {band}, not public companies. No em dashes."""
+Keep ranges tight around the benchmark: sales per employee within about 20% either side of the benchmark average, EBITDA
+margin no more than 5 points wide, multiple no more than 2.5 turns wide. Multiples must suit a company of {band}, not public
+companies. Each *_basis sentence under 30 words. No em dashes.
+Source rules: prefer industry associations, government data (Census, BLS), deal-data providers (GF Data, PitchBook, Capital IQ),
+large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and trade press. Never cite a business broker, a
+boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
+competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead."""
         j = _claude_json(p)
         sl, sh = float(j["sales_per_employee_low"]), float(j["sales_per_employee_high"])
         ml, mh = float(j["ebitda_margin_low"]), float(j["ebitda_margin_high"])
         xl, xh = float(j["multiple_low"]), float(j["multiple_high"])
+        sl, sh = _tighten(sl, sh, 1.6)
+        xl, xh = (xl, xh) if xh - xl <= 3 else ((xl + xh) / 2 - 1.5, (xl + xh) / 2 + 1.5)
+        ml, mh = (ml, mh) if mh - ml <= 6 else ((ml + mh) / 2 - 3, (ml + mh) / 2 + 3)
+        j.update(sales_per_employee_low=sl, sales_per_employee_high=sh, ebitda_margin_low=ml, ebitda_margin_high=mh,
+                 multiple_low=xl, multiple_high=xh)
         if not (40_000 <= sl <= sh <= 3_000_000 and 1 <= ml <= mh <= 45 and 2 <= xl <= xh <= 20) or not j.get("sources"):
             raise ValueError(f"benchmarks failed sanity check: {sl},{sh},{ml},{mh},{xl},{xh}")
         return j
 
-    return _cached(f"magnet_bench:{sector.lower()}|{band}", build)
+    return _cached(f"magnet_bench:v2:{sector.lower()}|{band}", build)
 
 
 def valuation_html(lead: dict, b: dict) -> tuple:
@@ -142,7 +164,7 @@ def valuation_html(lead: dict, b: dict) -> tuple:
     month = datetime.now(timezone.utc).strftime("%B %Y")
     drivers = "".join(f"<li><b>{esc(_clean(d.get('title')))}.</b> {esc(_clean(d.get('text')))}</li>" for d in b.get("value_drivers", [])[:6])
     stats = "".join(f'<div class="stat"><b>{esc(s.get("figure"))}</b><span>{esc(_clean(s.get("label")))}</span></div>' for s in b.get("buyer_stats", [])[:3])
-    srcs = "; ".join(esc(_clean(s)) for s in b.get("sources", []))
+    srcs = "; ".join(esc(_clean(s)) for s in b.get("sources", []) if not BANNED_SOURCES.search(str(s)))
     body = f"""
 <div class="cover" style="padding-top:.2in">
 <p class="brand">ADVOCATE ADVISORS</p><p class="sub">INVESTMENT BANKING</p>
@@ -188,13 +210,17 @@ Return ONLY JSON:
  "multiples": [{{"segment": "who or what size", "multiple": "e.g. 6.0x to 7.5x EBITDA", "source": "publisher"}}] (2 to 4 rows; private lower middle market where possible),
  "owner_takeaways": ["4 items, one or two sentences each: what this means for an owner thinking about the next few years"],
  "sources": ["Publisher, Title (Year)" for every source used]}}
-Plain English, no hype, no em dashes. If you cannot find real deals, return an empty deals list."""
+Plain English, no hype, no em dashes. If you cannot find real deals, return an empty deals list.
+Source rules: prefer industry associations, government data (Census, BLS), deal-data providers (GF Data, PitchBook, Capital IQ),
+large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and trade press. Never cite a business broker, a
+boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
+competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead."""
         j = _claude_json(p, uses=10)
         if not j.get("short_version") or not j.get("sources"):
             raise ValueError("sector report research came back empty")
         return j
 
-    return _cached(f"magnet_report:{sector.lower()}", build)
+    return _cached(f"magnet_report:v2:{sector.lower()}", build)
 
 
 def report_html(lead: dict, r: dict) -> str:
@@ -210,7 +236,7 @@ def report_html(lead: dict, r: dict) -> str:
         for d in deals[:6]) + "</table>") if deals else ""
     mult = "".join(f"<tr><td>{esc(_clean(m.get('segment')))}</td><td>{esc(_clean(m.get('multiple')))}</td><td>{esc(_clean(m.get('source')))}</td></tr>" for m in r.get("multiples", [])[:4])
     take = "".join(f"<li>{esc(_clean(x))}</li>" for x in r.get("owner_takeaways", [])[:4])
-    srcs = "".join(f"<p>{esc(_clean(s))}</p>" for s in r.get("sources", []))
+    srcs = "".join(f"<p>{esc(_clean(s))}</p>" for s in r.get("sources", []) if not BANNED_SOURCES.search(str(s)))
     body = f"""
 <div class="cover" style="padding-top:.2in">
 <p class="brand">ADVOCATE ADVISORS</p><p class="sub">INVESTMENT BANKING</p>
