@@ -24,6 +24,7 @@ import weekly
 import magnet
 import calendar_sync
 import calendly
+import leadpool
 from identity import resolve_owner_profile
 from bookings import is_booked_event, is_tenant_event, booking_from_payload, prospect_words, extract_meeting
 from research import company_research
@@ -1064,8 +1065,9 @@ def _render_pdf(request_fields: dict, assessment: dict, owner_status: str) -> by
     return WeasyHTML(string=build_pdf_html(req, assessment, owner_status or "verified_upstream")).write_pdf()
 
 
-def _brief_from_booking(email: str):
-    """Build the brief for a stored booking (a calendar-only call once we know who it's with)."""
+def _brief_from_booking(email: str, post: Optional[bool] = None, source: str = "calendar"):
+    """Build the brief for a stored booking (a calendar-only call once we know who it's with, or a lead-pool reply).
+    post=None posts to Slack only for an upcoming call; the lead pool passes post=False."""
     b = store.get_booking(store.bid_for(email)) or {}
     req = BriefingRequest(lead_name=b.get("lead_name"), first_name=b.get("first_name"), email=email,
                           company_name=b.get("company"), website=b.get("website"), location=b.get("location"))
@@ -1074,19 +1076,20 @@ def _brief_from_booking(email: str):
         return
     try:
         upcoming = (b.get("meeting_at") or "") >= datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        run_brief(req, notes, source="calendar", store_brief=True, post=upcoming)
+        run_brief(req, notes, source=source, store_brief=True, post=upcoming if post is None else post)
     except Exception as e:
-        print(json.dumps({"event": "brief_failed", "contact": req.lead_name, "via": "calendar", "error": str(e)[:300],
+        print(json.dumps({"event": "brief_failed", "contact": req.lead_name, "via": source, "error": str(e)[:300],
                           "trace": traceback.format_exc()[-1500:]}), flush=True)
     finally:
         release(email)
 
 
-def _queue_brief(email: str):
-    threading.Thread(target=_brief_from_booking, args=(email,), daemon=True).start()
+def _queue_brief(email: str, **kw):
+    threading.Thread(target=_brief_from_booking, args=(email,), kwargs=kw, daemon=True).start()
 
 
 calendar_sync.on_new_call = _queue_brief
+leadpool.on_new_lead = lambda email: _queue_brief(email, post=False, source="lead-pool")  # never posts to Slack
 
 
 def _catch_up_briefs(delay: int = 30):
@@ -1106,8 +1109,10 @@ if os.environ.get("DISABLE_CALENDAR_SYNC") != "1":
     threading.Thread(target=_catch_up_briefs, daemon=True).start()
 dashboard.configure(render_pdf=_render_pdf,
                     extract_meeting=lambda thread, state: extract_meeting(claude_client, MEETING_MODEL, thread, state),
-                    build_brief=_queue_brief)
+                    build_brief=_queue_brief, settings_saved=leadpool.ensure_started)
 app.include_router(dashboard.router)
 app.include_router(campaigns_view.router)
 app.include_router(weekly.router)
 app.include_router(magnet.router)
+app.include_router(leadpool.router)
+leadpool.ensure_started()  # no-op unless this client's config has "lead_pool_enabled": true

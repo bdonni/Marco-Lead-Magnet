@@ -76,6 +76,27 @@ CREATE TABLE IF NOT EXISTS campaigns (
   name       TEXT,
   updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS pool_leads (
+  email                 TEXT PRIMARY KEY,
+  token                 TEXT UNIQUE,
+  first_name            TEXT,
+  last_name             TEXT,
+  company               TEXT,
+  title                 TEXT,
+  website               TEXT,
+  location              TEXT,
+  campaign_id           INTEGER,
+  campaign_name         TEXT,
+  lead_id               TEXT,
+  category              TEXT,
+  reply_time            TEXT,
+  reply_excerpt         TEXT,
+  thread_json           TEXT,
+  created_at            TEXT,
+  claimed_by            TEXT,
+  claimed_at            TEXT,
+  released_history_json TEXT
+);
 CREATE INDEX IF NOT EXISTS briefs_email ON briefs(email);
 CREATE INDEX IF NOT EXISTS briefs_company ON briefs(company);
 """
@@ -222,10 +243,13 @@ def list_bookings(include_hidden: bool = False) -> list:
     by_email, by_company = _latest_briefs()
     with _lock, _conn() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM bookings")]
+        pool = {r["email"] for r in c.execute("SELECT email FROM pool_leads")}
     out = []
     for b in rows:
         if b.get("hidden") and not include_hidden:
             continue
+        if b["email"] in pool and not b.get("booked_at") and not b.get("meeting_at"):
+            continue  # a lead-pool reply that only exists to carry its brief is not a booked call (yet)
         b["brief"] = by_email.get(b["email"]) or by_company.get(norm_company(b.get("company")))
         b.pop("thread_json", None)
         out.append(b)
@@ -336,3 +360,113 @@ def all_bookings_raw() -> list:
         return [dict(r) for r in c.execute(
             "SELECT email, bid, lead_name, company, booked_at, meeting_at, meeting_source, meeting_event_uid, hidden, "
             "campaign_name FROM bookings")]
+
+
+# ---------------------------------------------------------------------------
+# Lead pool: positive replies the client's MDs claim first-come (leadpool.py). Empty unless the client turns it on.
+# ---------------------------------------------------------------------------
+
+POOL_FIELDS = ("first_name", "last_name", "company", "title", "website", "location", "campaign_id", "campaign_name",
+               "lead_id", "category", "reply_time", "reply_excerpt", "thread_json")
+
+
+def pool_upsert(d: dict) -> tuple:
+    """(created, token). A new lead gets a token; a known one has its details refreshed. The claim columns
+    (claimed_by, claimed_at, released_history_json) are never written here."""
+    email = (d.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return False, None
+    with _lock, _conn() as c:
+        row = c.execute("SELECT token FROM pool_leads WHERE email=?", (email,)).fetchone()
+        created = row is None
+        if created:
+            token = secrets.token_urlsafe(12)
+            c.execute("INSERT INTO pool_leads(email, token, created_at, released_history_json) VALUES (?,?,?,?)",
+                      (email, token, now_iso(), "[]"))
+        else:
+            token = row["token"]
+        sets, vals = [], []
+        for f in POOL_FIELDS:
+            v = d.get(f)
+            if v in (None, ""):
+                continue
+            sets.append(f"{f}=?"); vals.append(v)
+        if sets:
+            c.execute(f"UPDATE pool_leads SET {', '.join(sets)} WHERE email=?", (*vals, email))
+    return created, token
+
+
+def _pool_dict(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    d["thread"] = json.loads(d.get("thread_json") or "[]")
+    d["released_history"] = json.loads(d.get("released_history_json") or "[]")
+    return d
+
+
+def pool_get(token: str) -> Optional[dict]:
+    with _lock, _conn() as c:
+        r = c.execute("SELECT * FROM pool_leads WHERE token=?", (token or "",)).fetchone()
+    return _pool_dict(r) if r else None
+
+
+def pool_by_email(email: str) -> Optional[dict]:
+    with _lock, _conn() as c:
+        r = c.execute("SELECT * FROM pool_leads WHERE email=?", ((email or "").strip().lower(),)).fetchone()
+    return _pool_dict(r) if r else None
+
+
+def pool_list() -> list:
+    """Every pooled lead, newest reply first, with has_brief (any brief stored for that email)."""
+    with _lock, _conn() as c:
+        rows = [dict(r) for r in c.execute("SELECT * FROM pool_leads ORDER BY reply_time DESC, created_at DESC")]
+        briefed = {r["email"] for r in c.execute("SELECT DISTINCT email FROM briefs WHERE email IS NOT NULL")}
+    for d in rows:
+        d.pop("thread_json", None)
+        d["has_brief"] = d["email"] in briefed
+    return rows
+
+
+def claim(token: str, md: str) -> tuple:
+    """(ok, holder). First come wins: the UPDATE only lands while nobody holds the lead. md must be on the roster;
+    an unknown name or token gets (False, current holder or None)."""
+    import tenant
+    md = (md or "").strip()
+    roster = tenant.md_roster()  # read before taking _lock: tenant reads settings through it
+    with _lock, _conn() as c:
+        r = c.execute("SELECT claimed_by FROM pool_leads WHERE token=?", (token or "",)).fetchone()
+        if r is None:
+            return False, None
+        if md not in roster:
+            return False, r["claimed_by"]
+        n = c.execute("UPDATE pool_leads SET claimed_by=?, claimed_at=? WHERE token=? AND claimed_by IS NULL",
+                      (md, now_iso(), token)).rowcount
+        if n == 1:
+            return True, md
+        r = c.execute("SELECT claimed_by FROM pool_leads WHERE token=?", (token,)).fetchone()
+        return False, r["claimed_by"] if r else None
+
+
+def release(token: str, md: str) -> bool:
+    """Only the holder can hand a lead back. The claim is kept in released_history_json."""
+    md = (md or "").strip()
+    with _lock, _conn() as c:
+        r = c.execute("SELECT claimed_by, claimed_at, released_history_json FROM pool_leads WHERE token=?",
+                      (token or "",)).fetchone()
+        if r is None or not md or r["claimed_by"] != md:
+            return False
+        hist = json.loads(r["released_history_json"] or "[]")
+        hist.append({"md": md, "claimed_at": r["claimed_at"], "released_at": now_iso()})
+        n = c.execute("UPDATE pool_leads SET claimed_by=NULL, claimed_at=NULL, released_history_json=? "
+                      "WHERE token=? AND claimed_by=?", (json.dumps(hist), token, md)).rowcount
+        return n == 1
+
+
+def claim_counts(since_iso: Optional[str] = None) -> dict:
+    """Leads each MD holds that they claimed on or after since_iso (default: the start of this UTC month).
+    A released lead no longer counts for the MD who gave it back."""
+    if not since_iso:
+        since_iso = datetime.now(timezone.utc).strftime("%Y-%m-01T00:00:00Z")
+    with _lock, _conn() as c:
+        return {r["claimed_by"]: r["n"] for r in c.execute(
+            "SELECT claimed_by, COUNT(*) AS n FROM pool_leads WHERE claimed_by IS NOT NULL AND claimed_at>=? "
+            "GROUP BY claimed_by", (since_iso,))}

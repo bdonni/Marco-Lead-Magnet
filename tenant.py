@@ -92,6 +92,38 @@ def logo_b64() -> Optional[str]:
     return base64.b64encode(b).decode() if b else None
 
 
+def lead_pool_enabled() -> bool:
+    """The MD lead pool (leadpool.py) is off unless the client's config says "lead_pool_enabled": true."""
+    v = get("lead_pool_enabled")
+    return v is True or (isinstance(v, str) and v.strip().lower() == "true")
+
+
+def lead_pool_patterns() -> list:
+    """Case-insensitive substrings; a campaign whose name holds any of them feeds the pool. None set = nothing does."""
+    v = get("lead_pool_campaign_patterns") or []
+    if isinstance(v, str):
+        v = [v]
+    return [str(p).strip() for p in v if str(p or "").strip()] if isinstance(v, list) else []
+
+
+def lead_pool_since():
+    """Replies before this moment stay out of the pool. None = no cut-off."""
+    from datetime import datetime, timezone
+    v = get("lead_pool_since")
+    if not v:
+        return None
+    try:
+        d = datetime.fromisoformat(str(v).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def md_roster() -> list:
+    v = get("md_roster") or []
+    return [str(n).strip() for n in v if str(n or "").strip()] if isinstance(v, list) else []
+
+
 def possessive(name: str) -> str:
     return f"{name}'" if name.endswith("s") else f"{name}'s"
 

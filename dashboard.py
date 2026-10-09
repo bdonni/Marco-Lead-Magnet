@@ -42,10 +42,13 @@ ET = ZoneInfo("America/New_York")
 TZ_CHOICES = {"ET": "America/New_York", "CT": "America/Chicago", "MT": "America/Denver", "PT": "America/Los_Angeles"}
 
 router = APIRouter()
-_hooks = {"render_pdf": None, "extract_meeting": None, "build_brief": None}
+_hooks = {"render_pdf": None, "extract_meeting": None, "build_brief": None, "settings_saved": None}
 
 
-def configure(render_pdf: Callable = None, extract_meeting: Callable = None, build_brief: Callable = None):
+def configure(render_pdf: Callable = None, extract_meeting: Callable = None, build_brief: Callable = None,
+              settings_saved: Callable = None):
+    if settings_saved:
+        _hooks["settings_saved"] = settings_saved
     if render_pdf:
         _hooks["render_pdf"] = render_pdf
     if extract_meeting:
@@ -336,7 +339,7 @@ def locked() -> HTMLResponse:
 # ---------------------------------------------------------------------------
 
 @router.get("/briefs", response_class=HTMLResponse)
-def briefs_index(request: Request, key: Optional[str] = None, view: Optional[str] = None):
+def briefs_index(request: Request, key: Optional[str] = None, view: Optional[str] = None, msg: Optional[str] = None):
     if key is not None:
         if not _ok(key, _view_hash()):
             return locked()
@@ -388,9 +391,13 @@ def briefs_index(request: Request, key: Optional[str] = None, view: Optional[str
     table = (f"""<div class="card"><table><thead><tr><th>Call</th><th>Company</th><th>Contact</th><th>Booked</th>
 <th>Brief</th><th class="col-thread">Thread</th></tr></thead><tbody id="rows">{''.join(trs)}</tbody></table></div>"""
              if trs else "<div class='card empty'>Nothing here yet.</div>")
+    pool = ""
+    if tenant.lead_pool_enabled():  # the MD lead pool sits on top of the booked calls (only for clients that use it)
+        import leadpool
+        pool = leadpool.section(msg)
     body = f"""{nav("briefs")}<header class="top"><div class="brand">{_logo_tile()}<div><h1>Pre-Call Briefs</h1><div class="sub">{e(tenant.get('firm'))} · every booked call, its email thread and the brief</div></div></div>
 <div class="stats"><div class="stat"><b>{week}</b><span>calls next 7 days</span></div>
-<div class="stat"><b>{counts['upcoming']}</b><span>upcoming</span></div><div class="stat"><b>{len(rows)}</b><span>booked in total</span></div></div></header>
+<div class="stat"><b>{counts['upcoming']}</b><span>upcoming</span></div><div class="stat"><b>{len(rows)}</b><span>booked in total</span></div></div></header>{pool}
 <div class="bar"><div class="tabs">{tabs}</div><input class="search" id="q" placeholder="Search company, contact, state" autocomplete="off"></div>
 {table}
 <script>const q=document.getElementById('q');q&&q.addEventListener('input',()=>{{const v=q.value.trim().toLowerCase();
@@ -408,7 +415,7 @@ def share_link(b: Optional[dict]) -> str:
     return f"{PUBLIC_BASE_URL}/b/{b['share_token']}" if b and b.get("share_token") else f"{PUBLIC_BASE_URL}/briefs"
 
 
-def render_detail(b: dict, editable: bool, pdf_url: str, back: bool) -> HTMLResponse:
+def render_detail(b: dict, editable: bool, pdf_url: str, back: bool, msg: Optional[str] = None) -> HTMLResponse:
     br = b.get("brief") or {}
     req = br.get("request") or {}
     a = br.get("assessment") or {}
@@ -512,18 +519,22 @@ agency's website and the brief builds in about a minute.</p>
                        + thread_html)
 
     back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else "<span></span>"
+    pool = ""
+    if tenant.lead_pool_enabled():  # a lead-pool reply: who has claimed it, and the claim / release form
+        import leadpool
+        pool = leadpool.detail_block(b["email"], b["bid"], editable, msg)
     body = f"""<div class="brandbar">{back_link}{_logo_tile()}</div>
 <div class="card hero"><div><h1>{e(b.get('company') or b.get('lead_name') or '(company unknown)')}</h1>
 <div class="sub">{e(sub)}</div>
 </div>
-<div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>
+<div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>{pool}
 {f'<div class="card facts-card"><div class="facts">{facts_html}</div></div>' if facts_html else ''}
 <div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
     return page(f"{b.get('company') or b.get('lead_name') or 'Booking'} · Pre-Call Brief", body)
 
 
 @router.get("/briefs/{bid}", response_class=HTMLResponse)
-def brief_detail(request: Request, bid: str, key: Optional[str] = None):
+def brief_detail(request: Request, bid: str, key: Optional[str] = None, msg: Optional[str] = None):
     if key is not None:
         if not _ok(key, _view_hash()):
             return locked()
@@ -535,7 +546,7 @@ def brief_detail(request: Request, bid: str, key: Optional[str] = None):
     b = store.get_booking(bid)
     if not b:
         raise HTTPException(status_code=404, detail="not found")
-    return render_detail(b, True, f"/briefs/{bid}/pdf", True)
+    return render_detail(b, True, f"/briefs/{bid}/pdf", True, msg)
 
 
 @router.get("/b/{token}", response_class=HTMLResponse)
@@ -693,9 +704,11 @@ async def api_ingest(request: Request):
         for k, v in data["settings"].items():
             if k in ("calendar_ics_url", "tenant_config", "tenant_logo_b64", "view_key_sha256", "slack_webhook_url",
                      "slack_channel_id", "tenant_routes", "calendly_signing_key", "campaign_stats",
-                     "weekly_slack_webhook_url"):
+                     "weekly_slack_webhook_url", "smartlead_api_key"):
                 store.set_setting(k, (json.dumps(v) if isinstance(v, (dict, list)) else v) or None)
-                out.setdefault("settings", []).append(k)
+                out.setdefault("settings", []).append(k)  # names only: a secret's value is never echoed
+        if out.get("settings") and _hooks["settings_saved"]:
+            _hooks["settings_saved"]()
     if data.get("calendar_sync"):
         out["calendar"] = calendar_sync.sync_once()
     for d in data.get("bookings") or []:
