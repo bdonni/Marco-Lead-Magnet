@@ -21,6 +21,7 @@ import tenant
 import dashboard
 import campaigns_view
 import weekly
+import magnet
 import calendar_sync
 import calendly
 from identity import resolve_owner_profile
@@ -41,6 +42,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 store.init()
+magnet.init(claude_client)
 if os.environ.get("DISABLE_CALENDAR_SYNC") != "1":
     calendar_sync.start_background_sync()
 
@@ -1108,3 +1110,4 @@ dashboard.configure(render_pdf=_render_pdf,
 app.include_router(dashboard.router)
 app.include_router(campaigns_view.router)
 app.include_router(weekly.router)
+app.include_router(magnet.router)
