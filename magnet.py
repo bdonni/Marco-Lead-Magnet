@@ -31,6 +31,9 @@ import tenant
 router = APIRouter()
 MODEL = os.environ.get("MAGNET_MODEL", "claude-sonnet-4-6")
 CACHE_DAYS = 30
+WATCHDOG_SECS = 900
+# the 2026 search tool filters results with code execution and ran 20+ minutes on benchmark prompts; the basic tool is enough here
+SEARCH_TOOL = os.environ.get("MAGNET_SEARCH_TOOL", "web_search_20250305")
 BOOKING = "link.advocateadvisorsllc.com/widget/bookings/advocate-advisors-consultation"
 _lock = threading.Lock()
 _client = None
@@ -70,7 +73,7 @@ def _claude_json(prompt: str, uses: int = 8, deadline: int = 720) -> dict:
         if left < 30:
             raise ValueError(f"research ran past {deadline}s after {turns} turns")
         resp = _client.messages.create(model=MODEL, max_tokens=4000, messages=messages, timeout=left,
-                                       tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": uses}])
+                                       tools=[{"type": SEARCH_TOOL, "name": "web_search", "max_uses": uses}])
         turns += 1
         print(json.dumps({"event": "magnet_research_turn", "turn": turns, "stop": resp.stop_reason,
                           "secs": round(time.time() - t0)}), flush=True)
@@ -315,8 +318,15 @@ def _run(tok: str, kind: str, lead: dict) -> None:
     except Exception as e:
         page, data, status = "", {"error": str(e)[:300]}, "failed"
         print(json.dumps({"event": "magnet_failed", "token": tok, "kind": kind, "company": lead.get("company"), "error": str(e)[:300]}), flush=True)
+    with store._conn() as c:  # never overwrite a watchdog "failed" with a late result
+        c.execute("UPDATE magnets SET html=?, data=?, status=? WHERE token=? AND status='building'", (page, json.dumps(data), status, tok))
+
+
+def _expire(tok: str) -> None:
+    """A research call that never returns must not leave a lead's asset 'building' forever."""
     with store._conn() as c:
-        c.execute("UPDATE magnets SET html=?, data=?, status=? WHERE token=?", (page, json.dumps(data), status, tok))
+        c.execute("""UPDATE magnets SET status='failed', data=? WHERE token=? AND status='building'""",
+                  (json.dumps({"error": f"no result after {WATCHDOG_SECS}s"}), tok))
 
 
 def start(kind: str, lead: dict) -> dict:
@@ -326,6 +336,7 @@ def start(kind: str, lead: dict) -> dict:
         c.execute("INSERT INTO magnets (token, kind, email, company, html, data, created_at, status) VALUES (?,?,?,?,?,?,?,?)",
                   (tok, kind, (lead.get("email") or "").lower(), lead["company"], "", "{}", store.now_iso(), "building"))
     threading.Thread(target=_run, args=(tok, kind, lead), daemon=True).start()
+    threading.Timer(WATCHDOG_SECS, _expire, args=(tok,)).start()
     return {"token": tok, "kind": kind, "status": "building", "path": f"/m/{tok}", "pdf": f"/m/{tok}/pdf"}
 
 

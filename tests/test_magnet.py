@@ -22,7 +22,10 @@ import threading
 class _Now:  # run the background build inline so the test sees the result
     def __init__(self, target, args=(), daemon=None): self.f, self.a = target, args
     def start(self): self.f(*self.a)
-magnet.threading = type("T", (), {"Thread": _Now, "Lock": threading.Lock})
+class _NoTimer:
+    def __init__(self, *a, **k): pass
+    def start(self): pass
+magnet.threading = type("T", (), {"Thread": _Now, "Lock": threading.Lock, "Timer": _NoTimer})
 c = TestClient(main.app, base_url="https://testserver")
 H = {"x-ingest-key": INGEST}
 CALLS = []
