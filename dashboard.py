@@ -16,6 +16,7 @@ from typing import Callable, Optional
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
+import accounts
 import store
 import tenant
 import briefview
@@ -60,7 +61,8 @@ def _ok(key: Optional[str], want: str) -> bool:
 
 
 def _viewer(request: Request) -> bool:
-    return _ok(request.cookies.get(COOKIE), _view_hash())
+    return _ok(request.cookies.get(COOKIE), _view_hash()) or bool(
+        accounts.session_email(request.cookies.get(accounts.SESSION_COOKIE)))
 
 
 def _ingest(request: Request) -> None:
@@ -88,10 +90,16 @@ def _zones() -> tuple:
     return (home, ET, "CT", CT) if home == "ET" else (home, CT, "ET", ET)
 
 
+PT = ZoneInfo("America/Los_Angeles")
+
+
 def _fmt_call(iso: Optional[str]) -> tuple:
     d = _dt(iso)
     if not d:
         return ("", "")
+    if tenant.get("home_tz") == "PT":  # West Coast client: Pacific first, then Central and Eastern
+        p, c, t = d.astimezone(PT), d.astimezone(CT), d.astimezone(ET)
+        return (p.strftime("%a %-d %b"), f"{p.strftime('%-I:%M %p')} PT · {c.strftime('%-I:%M %p')} CT · {t.strftime('%-I:%M %p')} ET")
     hl, hz, ol, oz = _zones()
     h, o = d.astimezone(hz), d.astimezone(oz)
     return (h.strftime("%a %-d %b"), f"{h.strftime('%-I:%M %p')} {hl} · {o.strftime('%-I:%M %p')} {ol}")
@@ -297,10 +305,27 @@ def page(title: str, body: str, refresh: int = 0, foot: Optional[str] = None) ->
     return HTMLResponse(doc, headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"})
 
 
+FORM_CSS = ("display:flex;flex-direction:column;gap:10px;max-width:320px;margin:18px auto 0;text-align:left")
+INPUT_CSS = ("font:inherit;font-size:15px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;"
+             "background:var(--panel);color:var(--ink)")
+BTN_CSS = ("font:inherit;font-size:15px;font-weight:600;padding:10px 12px;border:0;border-radius:8px;"
+           "background:var(--accent);color:#fff;cursor:pointer")
+
+
+def _login_form(msg: str = "") -> str:
+    note = f'<p style="color:#c0392b;margin:0">{e(msg)}</p>' if msg else ""
+    return f"""<form method="post" action="/login" style="{FORM_CSS}">{note}
+<input type="email" name="email" placeholder="Email" autocomplete="username" required style="{INPUT_CSS}">
+<input type="password" name="password" placeholder="Password" autocomplete="current-password" required style="{INPUT_CSS}">
+<input type="hidden" name="next" id="nx" value="/briefs"><button type="submit" style="{BTN_CSS}">Sign in</button>
+<p style="margin:4px 0 0;font-size:13px;opacity:.75">Forgot your password? Ask Gamic and we'll send a new link.</p></form>
+<script>document.getElementById('nx').value=location.pathname==='/login'?'/briefs':location.pathname+location.search;</script>"""
+
+
 def locked() -> HTMLResponse:
     title = f"{tenant.get('firm_short')} dashboard" if store.get_setting("campaign_stats") else "Pre-Call Briefs"
     body = f"""<div class="card empty" style="margin-top:80px">{_logo_tile()}<h1 style="font-size:20px;margin:14px 0 6px">{e(title)}</h1>
-<p>This page needs your private access link. Ask Gamic to resend it.</p></div>"""
+{_login_form() if accounts.any_accounts() else '<p>This page needs your private access link. Ask Gamic to resend it.</p>'}</div>"""
     r = page(title, body, foot=f"Prepared for {tenant.get('firm')} by Gamic")
     r.status_code = 401
     return r
@@ -720,3 +745,100 @@ def api_calendar(request: Request):
         unmatched = []
     return {"connected": bool(store.get_setting("calendar_ics_url")), "last_ok": store.get_setting("calendar_last_ok"),
             "last_error": store.get_setting("calendar_last_error"), "unmatched": unmatched}
+
+
+# ---------------------------------------------------------------------------
+# Accounts: invite-only email + password sign-in (accounts.py)
+# ---------------------------------------------------------------------------
+
+async def _form(request: Request) -> dict:
+    from urllib.parse import parse_qs
+    raw = (await request.body()).decode("utf-8", "replace")
+    return {k: v[0] for k, v in parse_qs(raw).items()}
+
+
+def _safe_next(n: str) -> str:
+    n = n or "/briefs"
+    return n if n.startswith("/") and not n.startswith("//") else "/briefs"
+
+
+def _session_redirect(to: str, cookie: str) -> RedirectResponse:
+    r = RedirectResponse(_safe_next(to), status_code=303)
+    r.set_cookie(accounts.SESSION_COOKIE, cookie, max_age=accounts.SESSION_DAYS * 86400, httponly=True, secure=True,
+                 samesite="lax")
+    return r
+
+
+@router.post("/login")
+async def login(request: Request):
+    f = await _form(request)
+    ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "")
+    cookie = accounts.check_login(f.get("email", ""), f.get("password", ""), ip)
+    if not cookie:
+        title = f"{tenant.get('firm_short')} dashboard"
+        body = f"""<div class="card empty" style="margin-top:80px">{_logo_tile()}<h1 style="font-size:20px;margin:14px 0 6px">{e(title)}</h1>
+{_login_form("That email and password didn't match. Try again, or ask Gamic for a new link.")}</div>"""
+        r = page(title, body, foot=f"Prepared for {tenant.get('firm')} by Gamic")
+        r.status_code = 401
+        return r
+    return _session_redirect(f.get("next"), cookie)
+
+
+@router.get("/logout")
+def logout():
+    r = RedirectResponse("/briefs", status_code=303)
+    r.delete_cookie(accounts.SESSION_COOKIE)
+    r.delete_cookie(COOKIE)
+    return r
+
+
+def _invite_page(token: str, msg: str = "") -> HTMLResponse:
+    email = accounts.invite_email(token)
+    title = f"{tenant.get('firm_short')} dashboard"
+    if not email:
+        inner = "<p>This link has expired or was already used. Ask Gamic for a new one.</p>"
+    else:
+        note = f'<p style="color:#c0392b;margin:0">{e(msg)}</p>' if msg else ""
+        inner = f"""<p>Set a password for <b>{e(email)}</b>. You'll use it to sign in from now on.</p>
+<form method="post" action="/invite/{e(token)}" style="{FORM_CSS}">{note}
+<input type="password" name="password" placeholder="New password (10+ characters)" autocomplete="new-password" minlength="10" required style="{INPUT_CSS}">
+<input type="password" name="confirm" placeholder="Confirm password" autocomplete="new-password" minlength="10" required style="{INPUT_CSS}">
+<button type="submit" style="{BTN_CSS}">Set password and sign in</button></form>"""
+    body = f"""<div class="card empty" style="margin-top:80px">{_logo_tile()}<h1 style="font-size:20px;margin:14px 0 6px">{e(title)}</h1>{inner}</div>"""
+    return page(title, body, foot=f"Prepared for {tenant.get('firm')} by Gamic")
+
+
+@router.get("/invite/{token}", response_class=HTMLResponse)
+def invite_get(token: str):
+    return _invite_page(token)
+
+
+@router.post("/invite/{token}")
+async def invite_post(token: str, request: Request):
+    f = await _form(request)
+    if f.get("password") != f.get("confirm"):
+        return _invite_page(token, "The two passwords didn't match.")
+    if len(f.get("password") or "") < 10:
+        return _invite_page(token, "Please use at least 10 characters.")
+    email = accounts.set_password(token, f.get("password"))
+    if not email:
+        return _invite_page(token)
+    acc = json.loads(store.get_setting("accounts") or "{}").get(email) or {}
+    dest = "/campaigns" if store.get_setting("campaign_stats") else "/briefs"
+    return _session_redirect(dest, accounts.make_session(email, acc))
+
+
+@router.post("/api/briefs/accounts")
+async def api_accounts(request: Request):
+    """Gamic-only (ingest key): {"action": "invite"|"remove"|"list", "email": ...}. Invite returns the link to send."""
+    _ingest(request)
+    data = await request.json()
+    act = data.get("action")
+    if act == "invite":
+        tok = accounts.invite(data.get("email") or "")
+        return {"email": accounts._norm(data.get("email")), "link": f"{PUBLIC_BASE_URL}/invite/{tok}",
+                "expires_days": accounts.INVITE_DAYS}
+    if act == "remove":
+        return {"removed": accounts.remove(data.get("email") or "")}
+    return {"accounts": accounts.listing()}
+
