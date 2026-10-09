@@ -65,7 +65,7 @@ def _claude_json(prompt: str, uses: int = 8) -> dict:
     messages = [{"role": "user", "content": prompt}]
     resp = None
     for _ in range(4):  # resume pause_turn
-        resp = _client.messages.create(model=MODEL, max_tokens=6000, messages=messages, timeout=240,
+        resp = _client.messages.create(model=MODEL, max_tokens=6000, messages=messages, timeout=600,
                                        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": uses}])
         if resp.stop_reason != "pause_turn":
             break
