@@ -18,6 +18,11 @@ if "weasyprint" not in sys.modules:
     sys.modules["weasyprint"] = stub
 from fastapi.testclient import TestClient
 import main, magnet  # noqa: E402
+import threading
+class _Now:  # run the background build inline so the test sees the result
+    def __init__(self, target, args=(), daemon=None): self.f, self.a = target, args
+    def start(self): self.f(*self.a)
+magnet.threading = type("T", (), {"Thread": _Now, "Lock": threading.Lock})
 c = TestClient(main.app, base_url="https://testserver")
 H = {"x-ingest-key": INGEST}
 CALLS = []
@@ -42,6 +47,8 @@ LEAD = {"first_name": "Greg", "last_name": "Stephens", "email": "g@amleonard.com
 
 def test_valuation_matches_hand_example():
     r = c.post("/api/magnet/generate", headers=H, json={"kind": "valuation", "lead": dict(LEAD)}).json()
+    r = c.get("/api/magnet/" + r["token"], headers=H).json()
+    assert r["status"] == "ready"
     assert round(r["ev_low"] / 1e6, 1) == 13.9 and round(r["ev_high"] / 1e6, 1) == 43.6 and round(r["ev_central"] / 1e6, 1) == 26.0
     page = c.get(r["path"]).text
     assert "What A.M. Leonard might be worth today" in page and "$13.9M to $43.6M" in page and "PREPARED FOR GREG STEPHENS" in page
@@ -57,7 +64,9 @@ def test_report_and_guards():
     assert c.post("/api/magnet/generate", headers=H, json={"kind": "valuation", "lead": dict(LEAD, employees=0)}).status_code == 422
     global BENCH
     BENCH = dict(BENCH, multiple_high=60)
-    assert c.post("/api/magnet/generate", headers=H, json={"kind": "valuation", "lead": dict(LEAD, sector="odd things")}).status_code == 422
+    bad = c.post("/api/magnet/generate", headers=H, json={"kind": "valuation", "lead": dict(LEAD, sector="odd things")}).json()
+    assert c.get("/api/magnet/" + bad["token"], headers=H).json()["status"] == "failed"
+    assert c.get(bad["path"]).status_code == 404
     assert c.get("/m/nope").status_code == 404
 
 if __name__ == "__main__":

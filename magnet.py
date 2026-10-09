@@ -2,7 +2,8 @@
 
 Email 3 offers one of two things: a rough valuation range for the company, or a short report on who is buying in
 its sector and at what multiples. When a lead says yes, the positive-reply sync on gamic-ops calls
-POST /api/magnet/generate. That call builds the asset for that lead and returns a private link: /m/<token>, plus /m/<token>/pdf.
+POST /api/magnet/generate, which returns a private link at once (/m/<token>, plus /m/<token>/pdf) and builds the asset in a
+background thread; GET /api/magnet/<token> reports building / ready / failed.
 
 How the numbers are made:
 - Sector benchmarks come from Claude with web search, as JSON with a source for every figure. They are cached per sector and
@@ -41,6 +42,8 @@ def init(client) -> None:
     with store._conn() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS magnets (token TEXT PRIMARY KEY, kind TEXT, email TEXT, company TEXT,
                      html TEXT, data TEXT, created_at TEXT)""")
+        if "status" not in [r[1] for r in c.execute("PRAGMA table_info(magnets)")]:
+            c.execute("ALTER TABLE magnets ADD COLUMN status TEXT DEFAULT 'ready'")
 
 
 def _ingest(request: Request) -> None:
@@ -247,7 +250,7 @@ def _page(title: str, body: str) -> str:
     return f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title><style>{CSS}</style></head><body>{body}</body></html>'
 
 
-def generate(kind: str, lead: dict) -> dict:
+def _validate(kind: str, lead: dict) -> dict:
     if kind not in ("valuation", "report"):
         raise ValueError("kind must be valuation or report")
     for k in ("company", "sector"):
@@ -258,15 +261,43 @@ def generate(kind: str, lead: dict) -> dict:
         if staff < 10:
             raise ValueError("no usable headcount")
         lead["employees"] = staff
-        page, data = valuation_html(lead, bench(lead["sector"], staff))
-    else:
-        r = report_data(lead["sector"])
-        page, data = report_html(lead, r), {"sector": lead["sector"]}
+    return lead
+
+
+def build(kind: str, lead: dict) -> tuple:
+    if kind == "valuation":
+        return valuation_html(lead, bench(lead["sector"], lead["employees"]))
+    return report_html(lead, report_data(lead["sector"])), {"sector": lead["sector"]}
+
+
+def _run(tok: str, kind: str, lead: dict) -> None:
+    """Background build: research can take minutes and must never block the app's event loop."""
+    try:
+        page, data = build(kind, lead)
+        status = "ready"
+    except Exception as e:
+        page, data, status = "", {"error": str(e)[:300]}, "failed"
+        print(json.dumps({"event": "magnet_failed", "token": tok, "kind": kind, "company": lead.get("company"), "error": str(e)[:300]}), flush=True)
+    with store._conn() as c:
+        c.execute("UPDATE magnets SET html=?, data=?, status=? WHERE token=?", (page, json.dumps(data), status, tok))
+
+
+def start(kind: str, lead: dict) -> dict:
+    lead = _validate(kind, dict(lead))
     tok = secrets.token_urlsafe(12)
     with store._conn() as c:
-        c.execute("INSERT INTO magnets VALUES (?,?,?,?,?,?,?)", (tok, kind, (lead.get("email") or "").lower(), lead["company"],
-                                                              page, json.dumps(data), store.now_iso()))
-    return {"token": tok, "kind": kind, "path": f"/m/{tok}", "pdf": f"/m/{tok}/pdf", **{k: v for k, v in data.items() if k.startswith("ev_")}}
+        c.execute("INSERT INTO magnets (token, kind, email, company, html, data, created_at, status) VALUES (?,?,?,?,?,?,?,?)",
+                  (tok, kind, (lead.get("email") or "").lower(), lead["company"], "", "{}", store.now_iso(), "building"))
+    threading.Thread(target=_run, args=(tok, kind, lead), daemon=True).start()
+    return {"token": tok, "kind": kind, "status": "building", "path": f"/m/{tok}", "pdf": f"/m/{tok}/pdf"}
+
+
+def status(tok: str) -> dict:
+    m = _get(tok)
+    out = {"token": tok, "kind": m["kind"], "status": m.get("status") or "ready", "path": f"/m/{tok}", "pdf": f"/m/{tok}/pdf"}
+    d = json.loads(m.get("data") or "{}")
+    out.update({k: v for k, v in d.items() if k.startswith("ev_") or k == "error"})
+    return out
 
 
 def _get(tok: str) -> dict:
@@ -284,20 +315,33 @@ async def api_generate(request: Request):
         raise HTTPException(status_code=404)
     d = await request.json()
     try:
-        return generate(d.get("kind"), d.get("lead") or {})
+        return start(d.get("kind"), d.get("lead") or {})
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
 
+@router.get("/api/magnet/{tok}")
+def api_status(tok: str, request: Request):
+    _ingest(request)
+    return status(tok)
+
+
+def _ready(tok: str) -> dict:
+    m = _get(tok)
+    if (m.get("status") or "ready") != "ready":
+        raise HTTPException(status_code=404 if m.get("status") == "failed" else 425, detail=m.get("status"))
+    return m
+
+
 @router.get("/m/{tok}", response_class=HTMLResponse)
 def view(tok: str):
-    return HTMLResponse(_get(tok)["html"], headers={"X-Robots-Tag": "noindex"})
+    return HTMLResponse(_ready(tok)["html"], headers={"X-Robots-Tag": "noindex"})
 
 
 @router.get("/m/{tok}/pdf")
 def pdf(tok: str):
     from weasyprint import HTML
-    m = _get(tok)
+    m = _ready(tok)
     name = re.sub(r"[^A-Za-z0-9]+", "_", m["company"]).strip("_")
     label = "Rough_Valuation" if m["kind"] == "valuation" else "Sector_Report"
     return Response(HTML(string=m["html"]).write_pdf(), media_type="application/pdf",
