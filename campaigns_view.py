@@ -173,8 +173,9 @@ def _chart(days: list) -> str:
 
 
 def _steps(c: dict) -> str:
-    st = list(c.get("steps") or [])[:3] + [0] * max(0, 3 - len(c.get("steps") or []))
-    return '<div class="steps">' + "".join(
+    # one box per email in the sequence (the feed sends 3 unless it knows the sequence is shorter)
+    st = (list(c.get("steps") or []) or [0, 0, 0])[:3]
+    return f'<div class="steps" style="grid-template-columns:repeat({len(st)},minmax(0,1fr))">' + "".join(
         f'<div class="step"><span>Email {i + 1} sent</span><b>{_n(v)}</b></div>' for i, v in enumerate(st)) + "</div>"
 
 
