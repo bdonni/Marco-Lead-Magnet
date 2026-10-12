@@ -146,38 +146,59 @@ def _names(items: list, limit: int) -> str:
     return ", ".join(items[:limit]) + f" and {len(items) - limit} more"
 
 
+def _range(r: dict) -> str:
+    """'5 to 9 October', or '28 September to 2 October' across a month end."""
+    a, b = date.fromisoformat(r["week"]), date.fromisoformat(r["through"])
+    b = min(b, a + timedelta(days=4))  # the sending week is Monday to Friday
+    if a.month == b.month:
+        return f"{a.day} to {b.day} {b.strftime('%B')}"
+    return f"{a.day} {a.strftime('%B')} to {b.day} {b.strftime('%B')}"
+
+
 def slack_payload(r: dict, link: str) -> dict:
-    """The Slack message: same note, numbers and next week as the page, with a link to the full review."""
-    last = f"  ({_n(r['positives_last_week'])} last week)" if r.get("positives_last_week") else ""
+    """The Friday Slack message: headline, four numbers, what went out per campaign, who said yes, calls booked,
+    next week, and a button to the full review. Every count is pluralised; nothing is shown that is empty."""
+    firm = tenant.get("firm_short") or tenant.get("firm") or ""
+    last = r.get("positives_last_week") or 0
+    trend = f"   _{_n(last)} last week_" if last else ""
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"Weekly review · {r['week_label'].replace('Week of', 'week of')}"}},
+        {"type": "header", "text": {"type": "plain_text", "text": f"Weekly review · {_range(r)}"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"*{firm}*  ·  outbound programme run by Gamic"}]},
         {"type": "section", "text": {"type": "mrkdwn", "text": r["note"]}},
         {"type": "section", "fields": [
-            {"type": "mrkdwn", "text": f"*Positive replies*\n{_n(r['positives'])}{last}"},
+            {"type": "mrkdwn", "text": f"*Positive replies*\n{_n(r['positives'])}{trend}"},
             {"type": "mrkdwn", "text": f"*Calls booked*\n{_n(len(r['booked']))}"},
             {"type": "mrkdwn", "text": f"*Emails sent*\n{_n(r['emails'])}"},
             {"type": "mrkdwn", "text": f"*New owners reached*\n{_n(r['first_emails'])}"}]},
-        {"type": "divider"},
     ]
+    if r.get("went_out"):
+        rows = [f"•  *{w['label'] or 'Campaign'}*   {_plural(w['first'], 'first email', 'first emails')}"
+                + (f", {_plural(w['followups'], 'follow-up', 'follow-ups')}" if w["followups"] else "") for w in r["went_out"][:8]]
+        blocks += [{"type": "divider"}, {"type": "section", "text": {"type": "mrkdwn", "text": "*What went out*\n" + "\n".join(rows)}}]
     if r["said_yes"]:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                                                   "text": "*Who said yes*\n" + _names([p["company"] for p in r["said_yes"]], 12)}})
+        rows = [f"•  *{p['company']}*" + (f"  ·  {p['first_name']}" if p.get("first_name") else "")
+                + (f"  ·  {_short(p['day'])}" if p.get("day") else "") for p in r["said_yes"][:10]]
+        if len(r["said_yes"]) > 10:
+            rows.append(f"and {_n(len(r['said_yes']) - 10)} more on the dashboard")
+        blocks += [{"type": "divider"}, {"type": "section", "text": {"type": "mrkdwn", "text": "*Who said yes*\n" + "\n".join(rows)}}]
     if r["booked"]:
-        rows = [" · ".join(x for x in (b["company"], b["person"], _short(b["call"]) if b["call"] else "") if x) for b in r["booked"][:8]]
+        rows = ["•  " + "  ·  ".join(x for x in (f"*{b['company']}*", b["person"], ("call " + _short(b["call"])) if b["call"] else "") if x)
+                for b in r["booked"][:8]]
         if len(r["booked"]) > 8:
-            rows.append(f"and {len(r['booked']) - 8} more")
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Calls booked*\n" + "\n".join(rows)}})
+            rows.append(f"and {_n(len(r['booked']) - 8)} more on the dashboard")
+        blocks += [{"type": "divider"}, {"type": "section", "text": {"type": "mrkdwn", "text": "*Calls booked*\n" + "\n".join(rows)}}]
     if r["next_week"]:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Next week*\n" + "\n".join(
-            f"• *{n['when']}*  {n['text']}" for n in r["next_week"])}})
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"<{link}|Open the full weekly review>"}})
+        blocks += [{"type": "divider"}, {"type": "section", "text": {"type": "mrkdwn", "text": "*Next week*\n" + "\n".join(
+            f"•  *{n['when']}*   {n['text']}" for n in r["next_week"])}}]
+    blocks.append({"type": "actions", "elements": [{"type": "button", "style": "primary", "url": link,
+                   "text": {"type": "plain_text", "text": "Open the full weekly review"}}]})
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "Have a great weekend. Ben and the Gamic team"}]})
     for b in blocks:
         if b.get("text", {}).get("type") == "mrkdwn":
             b["text"]["text"] = b["text"]["text"][:2900]
-    firm = tenant.get("firm_short") or tenant.get("firm") or ""
-    return {"text": f"{firm} weekly review: {_n(r['positives'])} positive replies, {_n(len(r['booked']))} calls booked, "
-                    f"{_n(r['emails'])} emails sent", "blocks": blocks, "unfurl_links": False}
+    return {"text": f"{firm} weekly review, {_range(r)}: {_plural(r['positives'], 'positive reply', 'positive replies')}, "
+                    f"{_plural(len(r['booked']), 'call booked', 'calls booked')}, {_plural(r['emails'], 'email sent', 'emails sent')}",
+            "blocks": blocks, "unfurl_links": False}
 
 
 def _post(payload: dict) -> dict:

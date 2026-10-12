@@ -80,10 +80,10 @@ def run():
 
     p = weekly.slack_payload(r, "https://example.test/weekly?key=k&week=2026-10-05")
     text = json.dumps(p, ensure_ascii=False)
-    for want in ("Weekly review · week of 5 October", "Big week, Marco.", "*Positive replies*\\n9  (5 last week)",
-                 "*Calls booked*\\n1", "*Emails sent*\\n2,400", "*New owners reached*\\n1,350", "*Who said yes*\\nExample Fab and Sample Mills",
-                 "*Calls booked*\\nExample Fab · Pat Doe", "*Next week*", "Open the full weekly review",
-                 "Have a great weekend. Ben and the Gamic team"):
+    for want in ("Weekly review · 5 to", "Big week, Marco.", "*Positive replies*\\n9   _5 last week_",
+                 "*Calls booked*\\n1", "*Emails sent*\\n2,400", "*New owners reached*\\n1,350", "*Who said yes*\\n•  *Example Fab*",
+                 "*Sample Mills*", "*Calls booked*\\n•  *Example Fab*  ·  Pat Doe", "*What went out*", "*Wave 2 · Microsoft 365*   550 first emails, 1,050 follow-ups",
+                 "*Next week*", "Open the full weekly review", "Have a great weekend. Ben and the Gamic team"):
         assert want in text, want
     assert "Since" not in text and "since 10" not in text and "—" not in text
     assert all(len(b["text"]["text"]) <= 3000 for b in p["blocks"] if "text" in b and b["text"].get("type") == "mrkdwn")
