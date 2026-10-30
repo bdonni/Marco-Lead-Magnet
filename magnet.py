@@ -280,6 +280,7 @@ def report_html(lead: dict, r: dict) -> str:
     mult = "".join(f"<tr><td>{esc(_clean(m.get('segment')))}</td><td>{esc(_clean(m.get('multiple')))}</td><td>{esc(_clean(m.get('source')))}</td></tr>" for m in r.get("multiples", [])[:4])
     take = "".join(f"<li>{esc(_clean(x))}</li>" for x in r.get("owner_takeaways", [])[:4])
     srcs = "".join(f"<p>{esc(_clean(s))}</p>" for s in r.get("sources", []) if not BANNED_SOURCES.search(str(s)))
+    stat_src = re.sub(r"\s*\(via [^)]*\)", "", _clean(r.get("stats_source")))
     body = f"""
 <div class="cover" style="padding-top:.2in">
 <p class="brand">ADVOCATE ADVISORS</p><p class="sub">INVESTMENT BANKING</p>
@@ -288,7 +289,7 @@ def report_html(lead: dict, r: dict) -> str:
 <p class="meta">Prepared for {esc(lead['company'])} · {month}</p>
 <div class="box"><p class="kicker">THE SHORT VERSION</p><ul>{short}</ul></div></div>
 <section><p class="kicker">SECTION 01</p><h2>Where the market is</h2><div class="stats">{stats}</div>
-<p class="src">Source: {esc(re.sub(r"\s*\(via [^)]*\)", "", _clean(r.get('stats_source'))))}</p>{dyn}</section>
+<p class="src">Source: {esc(stat_src)}</p>{dyn}</section>
 <section><p class="kicker">SECTION 02</p><h2>Recent deals and multiples</h2>{deal_tbl}
 <table><tr><th>SEGMENT</th><th>MULTIPLE</th><th>SOURCE</th></tr>{mult}</table></section>
 <section><p class="kicker">SECTION 03</p><h2>What it means for owners</h2><ul>{take}</ul>{_proof()}</section>
