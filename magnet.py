@@ -14,6 +14,7 @@ Nothing is sent to the prospect from here. The link goes onto the #positive-repl
 """
 import html
 import json
+import urllib.request
 import os
 import re
 import secrets
@@ -111,7 +112,28 @@ def _tighten(lo: float, hi: float, ratio: float) -> tuple:
     return mid / ratio ** 0.5, mid * ratio ** 0.5
 
 
-BANNED_SOURCES = re.compile(r"ct acquisitions|dealstream|bizbuysell|iconic|business broker|sunbelt|transworld|axial|true north|axia growth", re.I)
+BANNED_SOURCES = re.compile(r"ct acquisitions|dealstream|bizbuysell|iconic|business broker|sunbelt|transworld|axial|true north|axia growth|hulett|navagant|diamond capital|capitalpad|capital advisors|\bm&a advisors?\b|investment bank", re.I)
+BIG_DEAL = re.compile(r"\$\s?\d[\d.,]*\s?(billion|bn|b)\b", re.I)
+PPLX_KEY = os.environ.get("PERPLEXITY_API_KEY", "").strip()
+
+
+def _deal_evidence(sector: str) -> str:
+    """Small-company deal data from Perplexity (PitchBook, GF Data, trade press). Optional: with no key or no credit the build
+    carries on with web search alone."""
+    if not PPLX_KEY:
+        return ""
+    q = (f"List real M&A deals from 2024 to 2026 where the target was a privately held US {sector} business with about $5M to $150M revenue "
+         "(enterprise value under $250M). Use PitchBook, GF Data and trade press. For each give date, target, buyer, buyer type and any disclosed "
+         "value or multiple. Leave out anything over $250M. Also give EBITDA multiples for deals under $100M in this sector, with the source.")
+    try:
+        body = json.dumps({"model": "sonar-pro", "messages": [{"role": "user", "content": q}]}).encode()
+        req = urllib.request.Request("https://api.perplexity.ai/chat/completions", data=body,
+                                     headers={"Authorization": "Bearer " + PPLX_KEY, "Content-Type": "application/json"})
+        r = json.load(urllib.request.urlopen(req, timeout=90))
+        return r["choices"][0]["message"]["content"][:6000]
+    except Exception as e:
+        print(json.dumps({"event": "magnet_perplexity_failed", "error": str(e)[:200]}), flush=True)
+        return ""
 
 
 def size_band(staff: int) -> str:
@@ -211,8 +233,12 @@ def valuation_html(lead: dict, b: dict) -> tuple:
 # ---------------------------------------------------------------------------
 def report_data(sector: str) -> dict:
     def build():
-        p = f"""You are an M&A analyst writing a short briefing for owners of privately held US {sector}. Search for current
-information (2025 and 2026). Every figure must come from a source you found; never invent a number, deal or quote.
+        evidence = _deal_evidence(sector)
+        p = f"""You are an M&A analyst writing a short briefing for owners of privately held US {sector}, typically $15M to $150M in
+revenue. Search for current information (2025 and 2026). Every figure must come from a source you found; never invent a number, deal or quote.
+Size rule, the most important rule here: this reader runs a mid-sized private company. Use only deals and buyers at their scale: targets
+under about $250M in value, lower middle market add-ons and platform deals. Never list a billion-dollar deal, a public company takeover or a
+mega-fund headline, and do not build the summary around them. If only the buyer is known and the target is small, that is a good example.
 Return ONLY JSON:
 {{"sector_label": "plain plural words for the sector",
  "short_version": ["5 bullets, each one or two sentences: deal activity, who is buying, multiples, demand drivers, what it means for owners"],
@@ -228,13 +254,16 @@ Source rules: prefer industry associations, government data (Census, BLS), deal-
 large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and trade press. Never cite a business broker, a
 boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
 competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead. When a figure comes from GF Data,
-cite GF Data, not the advisor who reposted it."""
+cite GF Data, not the advisor who reposted it.""" + (f"""
+
+Deal research already gathered (check it against your own search, use what is real, and name the original data source such as PitchBook):
+{evidence}""" if evidence else "")
         j = _claude_json(p, uses=10)
         if not j.get("short_version") or not j.get("sources"):
             raise ValueError("sector report research came back empty")
         return j
 
-    return _cached(f"magnet_report:v2:{sector.lower()}", build)
+    return _cached(f"magnet_report:v3:{sector.lower()}", build)
 
 
 def report_html(lead: dict, r: dict) -> str:
@@ -244,7 +273,7 @@ def report_html(lead: dict, r: dict) -> str:
     short = "".join(f"<li>{esc(_clean(x))}</li>" for x in r.get("short_version", [])[:5])
     stats = "".join(f'<div class="stat"><b>{esc(s.get("figure"))}</b><span>{esc(_clean(s.get("label")))}</span></div>' for s in r.get("stats", [])[:3])
     dyn = "".join(f"<h3>{esc(_clean(d.get('heading')))}</h3><p>{esc(_clean(d.get('text')))}</p>" for d in r.get("dynamics", [])[:4])
-    deals = r.get("deals") or []
+    deals = [d for d in (r.get("deals") or []) if not BIG_DEAL.search(f"{d.get('target')} {d.get('note')}")]
     deal_tbl = ("<table><tr><th>DATE</th><th>TARGET</th><th>BUYER</th><th>NOTE</th></tr>" + "".join(
         f"<tr><td>{esc(d.get('date'))}</td><td>{esc(_clean(d.get('target')))}</td><td>{esc(_clean(d.get('acquirer')))}</td><td>{esc(_clean(d.get('note')))}</td></tr>"
         for d in deals[:6]) + "</table>") if deals else ""
@@ -259,7 +288,7 @@ def report_html(lead: dict, r: dict) -> str:
 <p class="meta">Prepared for {esc(lead['company'])} · {month}</p>
 <div class="box"><p class="kicker">THE SHORT VERSION</p><ul>{short}</ul></div></div>
 <section><p class="kicker">SECTION 01</p><h2>Where the market is</h2><div class="stats">{stats}</div>
-<p class="src">Source: {esc(_clean(r.get('stats_source')))}</p>{dyn}</section>
+<p class="src">Source: {esc(re.sub(r"\s*\(via [^)]*\)", "", _clean(r.get('stats_source'))))}</p>{dyn}</section>
 <section><p class="kicker">SECTION 02</p><h2>Recent deals and multiples</h2>{deal_tbl}
 <table><tr><th>SEGMENT</th><th>MULTIPLE</th><th>SOURCE</th></tr>{mult}</table></section>
 <section><p class="kicker">SECTION 03</p><h2>What it means for owners</h2><ul>{take}</ul>{_proof()}</section>
