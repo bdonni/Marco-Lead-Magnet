@@ -406,6 +406,7 @@ body{font-family:Calibri,"Helvetica Neue",Arial,sans-serif;color:var(--ink);font
 .kicker{font-size:8pt;font-weight:700;letter-spacing:.2em;color:var(--goldt);margin:0 0 3px}
 .cover{padding-top:.4in}
 .cover .kicker{color:var(--slate);font-size:10pt;margin-top:.55in}
+.cover .box .kicker{margin-top:0;font-size:8pt;color:var(--goldt)}
 h1{font-size:23pt;line-height:1.2;margin:6px 0 14px;padding-bottom:14px;border-bottom:2px solid var(--gold)}
 .meta{color:var(--slate);margin:0 0 2px}
 h2{font-size:17pt;margin:0 0 10px;padding-bottom:6px;border-bottom:1.5px solid var(--head)}
@@ -427,7 +428,7 @@ td:first-child{font-weight:700;white-space:nowrap}
 td.n{text-align:right;white-space:nowrap}
 ul{list-style:none;padding:0;margin:6px 0}
 li{position:relative;padding-left:18px;margin:0 0 6px}
-li:before{content:"\25AA";color:var(--gold);position:absolute;left:0}
+li:before{content:"\\25AA";color:var(--gold);position:absolute;left:0}
 ol{list-style:none;padding:0;margin:6px 0;counter-reset:q}
 ol li{padding-left:30px}
 ol li:before{counter-increment:q;content:counter(q,decimal-leading-zero);color:var(--goldt);font-weight:700}
@@ -440,4 +441,6 @@ ol li:before{counter-increment:q;content:counter(q,decimal-leading-zero);color:v
 .big{font-family:Georgia,serif;font-size:34pt;font-weight:700;color:var(--head);margin:4px 0 0}
 .calc td:first-child{width:34%}.calc td.n{font-family:Georgia,serif;font-size:12pt}
 .note{font-size:9pt;color:var(--slate)}.hl{background:var(--head);color:#fff;padding:14px 18px;margin:10px 0 6px}
-.hl .big{color:#fff}.hl p{margin:0;color:#DCD6CC}"""
+.hl .big{color:#fff}.hl p{margin:0;color:#DCD6CC}
+@media screen{html{background:#EFECE6}body{box-sizing:border-box;max-width:820px;margin:32px auto;padding:56px 64px;background:#fff}}
+@media screen and (max-width:700px){body{margin:0;padding:28px 20px}.stats{flex-direction:column}table{display:block;overflow-x:auto}td:first-child{white-space:normal}}"""
