@@ -282,7 +282,7 @@ competitors of the firm sending this. If a figure is only on such a page, find t
 cite GF Data, not the advisor who reposted it.""" + (f"""
 
 Deal research already gathered (check it against your own search, use what is real, and name the original data source such as PitchBook):
-{evidence}""" if evidence else "")
+{evidence}""" if evidence else "") + (tenant.get("report_source_rule") or "")
         j = _claude_json(p, uses=10)
         if not j.get("short_version") or not j.get("sources"):
             raise ValueError("sector report research came back empty")
