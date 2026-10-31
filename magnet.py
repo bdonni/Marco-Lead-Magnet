@@ -293,7 +293,7 @@ def report_html(lead: dict, r: dict) -> str:
 <section><p class="kicker">SECTION 02</p><h2>Recent deals and multiples</h2>{deal_tbl}
 <table><tr><th>SEGMENT</th><th>MULTIPLE</th><th>SOURCE</th></tr>{mult}</table></section>
 <section><p class="kicker">SECTION 03</p><h2>What it means for owners</h2><ul>{take}</ul>{_proof()}</section>
-{_cta("If you'd like to know where " + esc(lead['company']) + " would sit in these ranges, Gene can walk you through it with your own numbers.", "04")}
+{_cta("Buyers like the ones in this report are active in " + label + " right now. If you'd like to know which of them could be a fit for " + esc(lead['company']) + " and where you'd sit in these ranges, Gene can walk you through it. You don't need to be selling.", "04")}
 <section class="sources"><p class="kicker">SOURCES</p>{srcs}</section>"""
     return _page(f"Sector report - {r.get('sector_label') or lead.get('sector')}", body)
 
