@@ -40,6 +40,31 @@ _lock = threading.Lock()
 _client = None
 
 
+def _enabled() -> bool:
+    """Advocate keeps its built-in defaults. Any other tenant needs report_enabled plus its own report_brand in tenant_config."""
+    return tenant.TENANT == "advocate" or bool(tenant.get("report_enabled") and tenant.get("report_brand"))
+
+
+def _brand() -> str:
+    return tenant.get("report_brand") or "ADVOCATE ADVISORS"
+
+
+def _brand_sub() -> str:
+    return tenant.get("report_brand_sub") or "INVESTMENT BANKING"
+
+
+def _caller() -> str:
+    return tenant.get("report_caller") or "Gene"
+
+
+def _size_text() -> str:
+    return tenant.get("report_size_text") or "$15M to $150M"
+
+
+def _deal_max() -> str:
+    return tenant.get("report_deal_max") or "$250M"
+
+
 def init(client) -> None:
     global _client
     _client = client
@@ -234,10 +259,10 @@ def valuation_html(lead: dict, b: dict) -> tuple:
 def report_data(sector: str) -> dict:
     def build():
         evidence = _deal_evidence(sector)
-        p = f"""You are an M&A analyst writing a short briefing for owners of privately held US {sector}, typically $15M to $150M in
+        p = f"""You are an M&A analyst writing a short briefing for owners of privately held US {sector}, typically {_size_text()} in
 revenue. Search for current information (2025 and 2026). Every figure must come from a source you found; never invent a number, deal or quote.
 Size rule, the most important rule here: this reader runs a mid-sized private company. Use only deals and buyers at their scale: targets
-under about $250M in value, lower middle market add-ons and platform deals. Never list a billion-dollar deal, a public company takeover or a
+under about {_deal_max()} in value, lower middle market add-ons and platform deals. Never list a billion-dollar deal, a public company takeover or a
 mega-fund headline, and do not build the summary around them. If only the buyer is known and the target is small, that is a good example.
 Return ONLY JSON:
 {{"sector_label": "plain plural words for the sector",
@@ -283,7 +308,7 @@ def report_html(lead: dict, r: dict) -> str:
     stat_src = re.sub(r"\s*\(via [^)]*\)", "", _clean(r.get("stats_source")))
     body = f"""
 <div class="cover" style="padding-top:.2in">
-<p class="brand">ADVOCATE ADVISORS</p><p class="sub">INVESTMENT BANKING</p>
+<p class="brand">{esc(_brand())}</p><p class="sub">{esc(_brand_sub())}</p>
 <p class="kicker">SECTOR REPORT · PREPARED FOR {who}</p>
 <h1>Who is buying {label}, and at what price</h1>
 <p class="meta">Prepared for {esc(lead['company'])} · {month}</p>
@@ -293,7 +318,7 @@ def report_html(lead: dict, r: dict) -> str:
 <section><p class="kicker">SECTION 02</p><h2>Recent deals and multiples</h2>{deal_tbl}
 <table><tr><th>SEGMENT</th><th>MULTIPLE</th><th>SOURCE</th></tr>{mult}</table></section>
 <section><p class="kicker">SECTION 03</p><h2>What it means for owners</h2><ul>{take}</ul>{_proof()}</section>
-{_cta("Buyers like the ones in this report are active in " + label + " right now. If you'd like to know which of them could be a fit for " + esc(lead['company']) + " and where you'd sit in these ranges, Gene can walk you through it. You don't need to be selling.", "04")}
+{_cta("Buyers like the ones in this report are active in " + label + " right now. If you'd like to know which of them could be a fit for " + esc(lead['company']) + " and where you'd sit in these ranges, " + esc(_caller()) + " can walk you through it. You don't need to be selling.", "04")}
 <section class="sources"><p class="kicker">SOURCES</p>{srcs}</section>"""
     return _page(f"Sector report - {r.get('sector_label') or lead.get('sector')}", body)
 
@@ -302,6 +327,8 @@ def report_html(lead: dict, r: dict) -> str:
 # Shared
 # ---------------------------------------------------------------------------
 def _proof() -> str:
+    if tenant.get("report_no_proof"):
+        return ""
     return """<div class="box"><p class="serif" style="font-weight:700;margin:0 0 4px">How a real process changes the number</p>
 <p>Advocate Advisors is an award-winning investment bank that works only for owners. Two recent results:</p>
 <ul><li>Sold a $120M revenue electrical contractor for 50% more than other investment banks said it was worth.</li>
@@ -310,6 +337,11 @@ def _proof() -> str:
 
 
 def _cta(text: str, n: str) -> str:
+    if tenant.get("report_no_booking"):
+        return f"""<section><p class="kicker">SECTION {n}</p><h2>Next step</h2><p>{text}</p>
+<div class="cta"><p class="serif">Reply to the email this came with</p>
+<p class="note">Everything you share stays confidential.</p></div>
+<p class="foot">A first look from public information only, not a formal valuation or an offer. Figures are estimates from published benchmarks.</p></section>"""
     return f"""<section><p class="kicker">SECTION {n}</p><h2>Next step</h2><p>{text}</p>
 <div class="cta"><p class="serif">Book 15 minutes with Gene</p><p class="link"><a href="https://{BOOKING}">{BOOKING}</a></p>
 <p class="note">Or reply to the email this came with. Everything you share stays confidential.</p></div>
@@ -389,9 +421,11 @@ def _get(tok: str) -> dict:
 @router.post("/api/magnet/generate")
 async def api_generate(request: Request):
     _ingest(request)
-    if tenant.TENANT != "advocate":  # the assets carry Advocate's branding and proof
+    if not _enabled():  # the assets carry a client's branding and proof
         raise HTTPException(status_code=404)
     d = await request.json()
+    if tenant.TENANT != "advocate" and d.get("kind") != "report":  # the valuation page is Advocate's only
+        raise HTTPException(status_code=404)
     try:
         return start(d.get("kind"), d.get("lead") or {})
     except ValueError as e:
@@ -423,7 +457,7 @@ def pdf(tok: str):
     name = re.sub(r"[^A-Za-z0-9]+", "_", m["company"]).strip("_")
     label = "Rough_Valuation" if m["kind"] == "valuation" else "Sector_Report"
     return Response(HTML(string=m["html"]).write_pdf(), media_type="application/pdf",
-                    headers={"Content-Disposition": f'inline; filename="Advocate_Advisors_{label}_{name}.pdf"'})
+                    headers={"Content-Disposition": f'inline; filename="{re.sub(r"[^A-Za-z0-9]+", "_", _brand().title())}_{label}_{name}.pdf"'})
 
 
 CSS = """
