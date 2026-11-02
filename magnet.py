@@ -148,8 +148,9 @@ def _deal_evidence(sector: str) -> str:
     if not PPLX_KEY:
         return ""
     q = (f"List real M&A deals from 2024 to 2026 where the target was a privately held US {sector} business with about $5M to $150M revenue "
-         "(enterprise value under $250M). Use PitchBook, GF Data and trade press. For each give date, target, buyer, buyer type and any disclosed "
-         "value or multiple. Leave out anything over $250M. Also give EBITDA multiples for deals under $100M in this sector, with the source.")
+         "(enterprise value under $250M). Use company announcements, filings and trade press. For each give date, target, buyer, buyer type, any disclosed "
+         "value or multiple, and the URL of the page you read it on. Leave out anything over $250M. Also give EBITDA multiples for deals under $100M in this sector, "
+         "with the URL. Never say a figure comes from PitchBook or any database unless the page you read says so.")
     try:
         body = json.dumps({"model": "sonar-pro", "messages": [{"role": "user", "content": q}]}).encode()
         req = urllib.request.Request("https://api.perplexity.ai/chat/completions", data=body,
@@ -193,7 +194,7 @@ Source rules: prefer industry associations, government data (Census, BLS), deal-
 large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and trade press. Never cite a business broker, a
 boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
 competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead. When a figure comes from GF Data,
-cite GF Data, not the advisor who reposted it."""
+cite GF Data, not the advisor who reposted it. Credit a data provider such as PitchBook or GF Data only when a page you read names it as the source of that exact figure, and then name that page too, as "Publisher, citing PitchBook". Never credit a provider because a figure looks like its data."""
         j = _claude_json(p, uses=4)
         sl, sh = float(j["sales_per_employee_low"]), float(j["sales_per_employee_high"])
         ml, mh = float(j["ebitda_margin_low"]), float(j["ebitda_margin_high"])
@@ -279,16 +280,16 @@ Source rules: prefer industry associations, government data (Census, BLS), deal-
 large accounting and research firms (KPMG, Deloitte, PwC, BDO, IBISWorld) and trade press. Never cite a business broker, a
 boutique M&A advisor or a sell-side firm's marketing page (for example CT Acquisitions, DealStream, BizBuySell, Iconic): those are
 competitors of the firm sending this. If a figure is only on such a page, find the original source it cites and use that instead. When a figure comes from GF Data,
-cite GF Data, not the advisor who reposted it.""" + (f"""
+cite GF Data, not the advisor who reposted it. Credit a data provider such as PitchBook or GF Data only when a page you read names it as the source of that exact figure, and then name that page too, as "Publisher, citing PitchBook". Never credit a provider because a figure looks like its data.""" + (f"""
 
-Deal research already gathered (check it against your own search, use what is real, and name the original data source such as PitchBook):
+Deal research already gathered (check it against your own search and use only what you can confirm on a page you read):
 {evidence}""" if evidence else "") + (tenant.get("report_source_rule") or "")
         j = _claude_json(p, uses=10)
         if not j.get("short_version") or not j.get("sources"):
             raise ValueError("sector report research came back empty")
         return j
 
-    return _cached(f"magnet_report:v4:{sector.lower()}", build)
+    return _cached(f"magnet_report:v5:{sector.lower()}", build)
 
 
 def report_html(lead: dict, r: dict) -> str:
