@@ -288,7 +288,7 @@ Deal research already gathered (check it against your own search, use what is re
             raise ValueError("sector report research came back empty")
         return j
 
-    return _cached(f"magnet_report:v3:{sector.lower()}", build)
+    return _cached(f"magnet_report:v4:{sector.lower()}", build)
 
 
 def report_html(lead: dict, r: dict) -> str:
