@@ -18,6 +18,52 @@ import store
 
 router = APIRouter()
 SL = "https://server.smartlead.ai/api/v1"
+# Gene's public booking calendar (link.advocateadvisorsllc.com/widget/bookings/advocate-advisors-consultation)
+DEFAULT_CALENDAR = {"advocate": "SBQYcB6jD8gI7TFsIkmF"}
+LEGACY_TIMES = "Wednesday at 1pm ET or Thursday at 3:30pm ET"  # the placeholder pair in the first 12 drafts (17 Nov)
+
+
+def _calendar_id() -> str:
+    import tenant
+    return tenant.get("booking_calendar_id") or DEFAULT_CALENDAR.get(tenant.TENANT, "")
+
+
+def live_slots() -> tuple:
+    """Two open times on the caller's booking calendar, on different days, at least 16 hours out. ('', '') if none."""
+    from datetime import datetime, timedelta, timezone
+    cal = _calendar_id()
+    if not cal:
+        return "", ""
+    now = datetime.now(timezone.utc)
+    try:
+        r = requests.get(f"https://backend.leadconnectorhq.com/calendars/{cal}/free-slots", timeout=20,
+                         params={"startDate": int(now.timestamp() * 1000), "endDate": int((now + timedelta(days=14)).timestamp() * 1000),
+                                 "timezone": "America/New_York"}, headers={"User-Agent": "Mozilla/5.0"})
+        days = {k: v for k, v in r.json().items() if isinstance(v, dict)}
+    except Exception:
+        return "", ""
+    picks, seen = [], set()
+    for day in sorted(days):
+        for t in days[day].get("slots") or []:
+            d = datetime.fromisoformat(t)
+            if d < now + timedelta(hours=16) or day in seen or d.hour < 9 or d.hour > 16:
+                continue
+            seen.add(day)
+            picks.append(d)
+            break
+        if len(picks) == 2:
+            break
+    fmt = lambda d: d.strftime("%A ") + str(d.day) + d.strftime(" %b at ") + d.strftime("%I:%M%p").lstrip("0").replace(":00", "").lower() + " ET"
+    return (fmt(picks[0]), fmt(picks[1])) if len(picks) == 2 else ("", "")
+
+
+def _fill_times(body: str) -> str:
+    if "{{slot1}}" not in body and LEGACY_TIMES not in body:
+        return body
+    t1, t2 = live_slots()
+    if not t1:
+        return body.replace("{{slot1}}", "[time 1]").replace("{{slot2}}", "[time 2]")
+    return body.replace(LEGACY_TIMES, f"{t1} or {t2}").replace("{{slot1}}", t1).replace("{{slot2}}", t2)
 
 
 def init() -> None:
@@ -102,7 +148,7 @@ def view(tok: str):
     said = f"<div class=c><div class=m>Their last reply</div><p>{html.escape(f['they_said'])}</p></div>" if f["they_said"] else ""
     form = (f"<form class=c method=post action='/f/{tok}/send'><div class=m>Edit if needed, then send. It goes in the same "
             f"email thread, from the same inbox, with the usual signature.</div><p><textarea id=body name=body>"
-            f"{html.escape(f['body'])}</textarea></p><div class=b><button class=s type=submit>Send</button>"
+            f"{html.escape(_fill_times(f['body']))}</textarea></p><div class=b><button class=s type=submit>Send</button>"
             f"<button class=k type=submit formaction='/f/{tok}/skip'>Don't send</button></div></form>")
     return _page("Follow-up", head + said + form)
 
