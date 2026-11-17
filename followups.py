@@ -191,3 +191,16 @@ def skip(tok: str):
     if f["status"] == "pending":
         _set(tok, status="skipped", done_at=store.now_iso(), result="not sent")
     return view(tok)
+
+
+@router.get("/f/{tok}/go", response_class=HTMLResponse)
+def go(tok: str):
+    """One tap from the Slack card: sends the stored draft exactly as the card shows it. The send runs from a small
+    script on the page, so link previewers that only fetch the URL never trigger it."""
+    f = _get(tok)
+    if f["status"] != "pending":
+        return view(tok)
+    return _page("Sending", f"<div class=c><p>Sending to {html.escape(f['company'] or f['email'])}...</p>"
+                            f"<form id=g method=post action='/f/{tok}/send'><textarea name=body hidden>"
+                            f"{html.escape(f['body'])}</textarea><noscript><button class=s type=submit>Send</button></noscript>"
+                            f"</form></div><script>document.getElementById('g').submit()</script>")
