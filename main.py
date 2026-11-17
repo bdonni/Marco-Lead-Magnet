@@ -22,6 +22,7 @@ import dashboard
 import campaigns_view
 import weekly
 import magnet
+import followups
 import calendar_sync
 import calendly
 import leadpool
@@ -44,6 +45,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 store.init()
 magnet.init(claude_client)
+followups.init()
 if os.environ.get("DISABLE_CALENDAR_SYNC") != "1":
     calendar_sync.start_background_sync()
 
@@ -1114,5 +1116,6 @@ app.include_router(dashboard.router)
 app.include_router(campaigns_view.router)
 app.include_router(weekly.router)
 app.include_router(magnet.router)
+app.include_router(followups.router)
 app.include_router(leadpool.router)
 leadpool.ensure_started()  # no-op unless this client's config has "lead_pool_enabled": true
