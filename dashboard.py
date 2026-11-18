@@ -376,26 +376,29 @@ def briefs_index(request: Request, key: Optional[str] = None, view: Optional[str
                      else "<span class='badge bad'>No brief yet</span>")
         site = (b.get("website") or "").replace("https://", "").replace("http://", "").strip("/")
         search = " ".join(str(b.get(k) or "") for k in ("company", "lead_name", "email", "website", "location")).lower()
+        thread_td = "" if tenant.get("hide_thread") else f"<td class='col-thread'><small class='muted'>{int(b.get('thread_count') or 0)} emails</small></td>"
         trs.append(f"""<tr data-s="{e(search)}" onclick="location.href='/briefs/{e(b['bid'])}'">
 <td class="when">{when}</td>
 <td><div class="co"><a href="/briefs/{e(b['bid'])}">{e(b.get('company') or b.get('lead_name') or '(company unknown)')}</a></div><small class="muted">{e(site)}</small></td>
 <td>{e(b.get('lead_name') or b.get('first_name') or '')}<br><small class="muted">{e(briefview.clean_place(b.get('location')) or '')}</small></td>
 <td>{e(_fmt_day(b.get('booked_at')))}</td>
 <td>{brief}</td>
-<td class="col-thread"><small class="muted">{int(b.get('thread_count') or 0)} emails</small></td></tr>""")
+{thread_td}</tr>""")
 
     tabs = "".join(
         f"<a class='tab{' on' if view == k else ''}' href='/briefs?view={k}'>{lbl}</a>"
         for k, lbl in (("upcoming", f"Upcoming ({counts['upcoming']})"), ("unset", f"Time not set ({counts['unset']})"),
                        ("past", f"Past ({counts['past']})"), ("all", f"All ({len(rows)})")))
+    thread_th = "" if tenant.get("hide_thread") else '<th class="col-thread">Thread</th>'
     table = (f"""<div class="card"><table><thead><tr><th>Call</th><th>Company</th><th>Contact</th><th>Booked</th>
-<th>Brief</th><th class="col-thread">Thread</th></tr></thead><tbody id="rows">{''.join(trs)}</tbody></table></div>"""
+<th>Brief</th>{thread_th}</tr></thead><tbody id="rows">{''.join(trs)}</tbody></table></div>"""
              if trs else "<div class='card empty'>Nothing here yet.</div>")
     pool = ""
     if tenant.lead_pool_enabled():  # the MD lead pool sits on top of the booked calls (only for clients that use it)
         import leadpool
         pool = leadpool.section(msg)
-    body = f"""{nav("briefs")}<header class="top"><div class="brand">{_logo_tile()}<div><h1>Pre-Call Briefs</h1><div class="sub">{e(tenant.get('firm'))} · every booked call, its email thread and the brief</div></div></div>
+    sub_line = "every booked call and its brief" if tenant.get("hide_thread") else "every booked call, its email thread and the brief"
+    body = f"""{nav("briefs")}<header class="top"><div class="brand">{_logo_tile()}<div><h1>Pre-Call Briefs</h1><div class="sub">{e(tenant.get('firm'))} · {sub_line}</div></div></div>
 <div class="stats"><div class="stat"><b>{week}</b><span>calls next 7 days</span></div>
 <div class="stat"><b>{counts['upcoming']}</b><span>upcoming</span></div><div class="stat"><b>{len(rows)}</b><span>booked in total</span></div></div></header>{pool}
 <div class="bar"><div class="tabs">{tabs}</div><input class="search" id="q" placeholder="Search company, contact, state" autocomplete="off"></div>
@@ -461,7 +464,7 @@ def render_detail(b: dict, editable: bool, pdf_url: str, back: bool, msg: Option
     if br:
         label, cls = OWNER_BADGE.get(br.get("owner_status") or "", ("Owner profile", "neutral"))
         secs = []
-        for key, title in briefview.SECTIONS:
+        for key, title in briefview.sections():
             items = v.get(key) or []
             if not items:
                 continue
@@ -512,6 +515,8 @@ agency's website and the brief builds in about a minute.</p>
     thread_html = (f"<div class='card thread'><div class='briefhead'><b>Email thread</b><small class='muted'>{len(msgs)} emails</small></div>{''.join(msgs)}</div>"
                    if msgs else "<div class='card empty'>No emails stored for this booking yet.</div>")
 
+    if tenant.get("hide_thread"):  # client sees the brief only, no email thread (Grasemann, 18 Nov 2026)
+        thread_html = ""
     if b.get("form_answers"):
         rows = "".join(f"<div class='msg reply'><div class='body'>{e(line)}</div></div>"
                        for line in b["form_answers"].splitlines() if line.strip())
@@ -523,13 +528,15 @@ agency's website and the brief builds in about a minute.</p>
     if tenant.lead_pool_enabled():  # a lead-pool reply: who has claimed it, and the claim / release form
         import leadpool
         pool = leadpool.detail_block(b["email"], b["bid"], editable, msg)
+    cols = (f'<div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>' if thread_html
+            else f'<div>{brief_html}</div>')
     body = f"""<div class="brandbar">{back_link}{_logo_tile()}</div>
 <div class="card hero"><div><h1>{e(b.get('company') or b.get('lead_name') or '(company unknown)')}</h1>
 <div class="sub">{e(sub)}</div>
 </div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>{pool}
 {f'<div class="card facts-card"><div class="facts">{facts_html}</div></div>' if facts_html else ''}
-<div class="cols"><div>{brief_html}</div><div>{thread_html}</div></div>"""
+{cols}"""
     return page(f"{b.get('company') or b.get('lead_name') or 'Booking'} · Pre-Call Brief", body)
 
 

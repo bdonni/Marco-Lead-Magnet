@@ -7,6 +7,8 @@ import re
 from datetime import datetime
 from typing import Optional
 
+import tenant
+
 NO_NEWS = {"no significant news found", "no news found", "none", "n/a", ""}
 _LEAD_INS = re.compile(r"^(profile( overview)? (of|for) [^:\n]+:?|summary:?|overall,?\s*)", re.I)
 
@@ -116,3 +118,9 @@ SECTIONS = [  # (key, title) in reading order for the call
     ("strengths", "Deal strengths"),
     ("recent", "Recent developments"),
 ]
+
+
+def sections() -> list:
+    """SECTIONS minus any the client hides (tenant config brief_hide_sections, e.g. Grasemann hides call advice)."""
+    hide = set(tenant.get("brief_hide_sections") or [])
+    return [(k, t) for k, t in SECTIONS if k not in hide]

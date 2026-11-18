@@ -272,7 +272,7 @@ def build_pdf_html(req: BriefingRequest, assessment: dict, owner_status: str = "
     )
 
     blocks = []
-    for key, title in briefview.SECTIONS:
+    for key, title in briefview.sections():
         items = v.get(key) or []
         if not items:
             continue
