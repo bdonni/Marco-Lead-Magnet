@@ -105,6 +105,7 @@ MEETING_RANK = {"thread": 1, "manual": 2, "calendar": 3}
 
 BOOKING_FIELDS = ("lead_name", "first_name", "title", "company", "website", "location", "campaign_id",
                   "campaign_name", "lead_id", "form_answers")
+MANUAL_NAME_FIELDS = ("lead_name", "first_name", "title", "company")
 
 
 def now_iso() -> str:
@@ -140,6 +141,8 @@ def init() -> None:
             c.execute("ALTER TABLE bookings ADD COLUMN meeting_day_only INTEGER DEFAULT 0")
         if "form_answers" not in cols:  # answers from a booking form (Calendly), kept for brief rebuilds
             c.execute("ALTER TABLE bookings ADD COLUMN form_answers TEXT")
+        if "names_manual" not in cols:  # names fixed by hand on the dashboard; syncs never overwrite them
+            c.execute("ALTER TABLE bookings ADD COLUMN names_manual INTEGER DEFAULT 0")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS bookings_share ON bookings(share_token)")
         c.execute("CREATE INDEX IF NOT EXISTS bookings_bid ON bookings(bid)")
         for r in c.execute("SELECT email FROM bookings WHERE share_token IS NULL").fetchall():
@@ -162,10 +165,14 @@ def upsert_booking(d: dict) -> Optional[str]:
         sets, vals = [], []
         for f in BOOKING_FIELDS:
             v = d.get(f)
-            if v in (None, ""):
-                continue
+            if v in (None, "") and not (v == "" and d.get("names_manual") and f in MANUAL_NAME_FIELDS):
+                continue  # blanks never wipe, except a field cleared by hand on the dashboard
+            if v == "":
+                v = None
             if f in ("lead_name", "company") and row[f] and d.get("names_soft"):
                 continue  # a sync guess never overwrites a name the brief already settled
+            if f in MANUAL_NAME_FIELDS and row["names_manual"] and not d.get("names_manual"):
+                continue  # a name fixed by hand on the dashboard always wins
             sets.append(f"{f}=?"); vals.append(v)
         # booked_at: 'event' times (webhook, brief request, Clay row) beat 'soft' guesses; earliest event wins
         bat, src = d.get("booked_at"), ("soft" if d.get("booked_at_soft") else "event")
@@ -188,6 +195,8 @@ def upsert_booking(d: dict) -> Optional[str]:
                      1 if m.get("day_only") else 0]
         if "hidden" in d:
             sets.append("hidden=?"); vals.append(1 if d["hidden"] else 0)
+        if d.get("names_manual"):
+            sets.append("names_manual=?"); vals.append(1)
         if sets:
             sets.append("updated_at=?"); vals.append(ts)
             c.execute(f"UPDATE bookings SET {', '.join(sets)} WHERE email=?", (*vals, email))

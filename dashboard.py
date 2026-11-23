@@ -237,6 +237,7 @@ tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover{backgrou
 .calltime .big{font-size:20px;font-weight:700;line-height:1.25}
 .calltime form{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 form.identify{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+details.editnames{margin-top:8px}details.editnames summary{cursor:pointer;font-size:13px;color:var(--muted)}
 form.identify input{font:inherit;font-size:14px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);flex:1 1 200px;min-width:0}
 .calltime input,.calltime select{font:inherit;font-size:13px;padding:5px 7px;border:1px solid var(--line);border-radius:6px;
 background:var(--panel);color:var(--ink)}
@@ -523,6 +524,12 @@ agency's website and the brief builds in about a minute.</p>
         thread_html = (f"<div class='card thread'><div class='briefhead'><b>Booking form answers</b></div>{rows}</div>"
                        + thread_html)
 
+    names_form = "" if not editable else f"""<details class="editnames"><summary>Edit names</summary>
+<form method="post" action="/briefs/{e(b['bid'])}/names" class="identify">
+<input name="lead_name" value="{e(b.get('lead_name') or req.get('lead_name') or '')}" placeholder="Contact name">
+<input name="title" value="{e(b.get('title') or req.get('title') or '')}" placeholder="Title">
+<input name="company" value="{e(b.get('company') or '')}" placeholder="Company">
+<button class="btn" type="submit">Save names</button></form></details>"""
     back_link = '<a class="back" href="/briefs">← All booked calls</a>' if back else "<span></span>"
     pool = ""
     if tenant.lead_pool_enabled():  # a lead-pool reply: who has claimed it, and the claim / release form
@@ -532,7 +539,7 @@ agency's website and the brief builds in about a minute.</p>
             else f'<div>{brief_html}</div>')
     body = f"""<div class="brandbar">{back_link}{_logo_tile()}</div>
 <div class="card hero"><div><h1>{e(b.get('company') or b.get('lead_name') or '(company unknown)')}</h1>
-<div class="sub">{e(sub)}</div>
+<div class="sub">{e(sub)}</div>{names_form}
 </div>
 <div class="calltime"><small class="muted">CALL</small>{call}{form}</div></div>{pool}
 {f'<div class="card facts-card"><div class="facts">{facts_html}</div></div>' if facts_html else ''}
@@ -615,6 +622,22 @@ def identify_call(request: Request, bid: str, who: str = Form(...), company: str
     return RedirectResponse(f"/briefs/{store.bid_for(target)}", status_code=303)
 
 
+@router.post("/briefs/{bid}/names")
+def set_names(request: Request, bid: str, lead_name: str = Form(""), title: str = Form(""), company: str = Form("")):
+    """Fix the contact name, title or company by hand. Kept over every later sync."""
+    if not _viewer(request):
+        return locked()
+    b = store.get_booking(bid)
+    if not b:
+        raise HTTPException(status_code=404, detail="not found")
+    lead = " ".join((lead_name or "").split())
+    first = lead.split(" ")[0] if lead else ""
+    store.upsert_booking({"email": b["email"], "names_manual": True, "lead_name": lead, "first_name": first,
+                          "title": " ".join((title or "").split()),
+                          "company": " ".join((company or "").split()) or b.get("company")})
+    return RedirectResponse(f"/briefs/{bid}", status_code=303)
+
+
 @router.post("/briefs/{bid}/dismiss")
 def dismiss_call(request: Request, bid: str):
     if not _viewer(request):
@@ -639,12 +662,19 @@ def _pdf_response(b: Optional[dict]) -> Response:
     if not b or not b.get("brief") or not _hooks["render_pdf"]:
         raise HTTPException(status_code=404, detail="no brief")
     br = b["brief"]
+    req = dict(br.get("request") or {})
     path = pdf_path(br["id"])
+    if b.get("names_manual"):  # names fixed by hand go into the PDF too, cached under their own file
+        for k in ("lead_name", "title", "company"):
+            if b.get(k):
+                req[k] = b[k]
+        tag = hashlib.sha1("|".join(str(req.get(k) or "") for k in ("lead_name", "title", "company")).encode()).hexdigest()[:8]
+        path = path[:-4] + "-" + tag + ".pdf"
     try:
         with open(path, "rb") as fh:
             pdf = fh.read()
     except OSError:
-        pdf = _hooks["render_pdf"](br.get("request") or {}, br.get("assessment") or {}, br.get("owner_status") or "")
+        pdf = _hooks["render_pdf"](req, br.get("assessment") or {}, br.get("owner_status") or "")
         try:
             os.makedirs(PDF_DIR, exist_ok=True)
             with open(path + ".tmp", "wb") as fh:

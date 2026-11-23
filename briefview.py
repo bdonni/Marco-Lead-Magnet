@@ -73,8 +73,10 @@ def _years(founded: Optional[str]) -> Optional[int]:
 def facts(req: dict, booking: Optional[dict] = None) -> list:
     """At-a-glance facts as (label, value) pairs, blanks dropped."""
     b = booking or {}
-    lead = req.get("lead_name") or b.get("lead_name")
-    title = req.get("title") or b.get("title")
+    if b.get("names_manual"):  # names fixed by hand on the dashboard beat what the brief was built with
+        lead, title = b.get("lead_name") or req.get("lead_name"), b.get("title") or req.get("title")
+    else:
+        lead, title = req.get("lead_name") or b.get("lead_name"), req.get("title") or b.get("title")
     founded = req.get("founded_year")
     yrs = _years(founded)
     loc = clean_place(req.get("location")) or clean_place(b.get("location"))
